@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from datetime import timedelta
 from pathlib import Path
+import os
 
 from django.db.backends.signals import connection_created
 from dotenv import load_dotenv
@@ -51,6 +52,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'accounts',
     'django_api',
+    'identity_verification',
 ]
 
 MIDDLEWARE = [
@@ -205,3 +207,13 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
 }
+
+# Identity verification settings. Software custody is for development/tests only;
+# production must provide an HSM-backed custody backend and a 32-byte AES key.
+IDENTITY_SESSION_TTL_SECONDS = int(os.getenv("IDENTITY_SESSION_TTL_SECONDS", "300"))
+IDENTITY_AES_KEY_B64 = os.getenv("IDENTITY_AES_KEY_B64", "")
+IDENTITY_CURRENT_SIGNING_EPOCH = int(os.getenv("IDENTITY_CURRENT_SIGNING_EPOCH", "1"))
+IDENTITY_AUTHORITY_IDENTIFIER = os.getenv("IDENTITY_AUTHORITY_IDENTIFIER", "kormic-dev-authority")
+IDENTITY_KEY_CUSTODY_BACKEND = os.getenv("IDENTITY_KEY_CUSTODY_BACKEND", "software-dev")
+IDENTITY_ALLOW_DEV_KEY_CUSTODY = os.getenv("IDENTITY_ALLOW_DEV_KEY_CUSTODY", "1" if DEBUG else "0") == "1"
+REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["identity"] = os.getenv("IDENTITY_THROTTLE_RATE", "20/min")
