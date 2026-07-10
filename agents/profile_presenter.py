@@ -1,0 +1,301 @@
+# agents/profile_presenter.py
+
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+
+import anthropic
+from dotenv import load_dotenv
+
+load_dotenv()
+
+api_key = os.getenv("ANTHROPIC_API_KEY")
+
+if not api_key:
+    raise ValueError("ANTHROPIC_API_KEY not found. Check your .env file.")
+
+client = anthropic.Anthropic(api_key=api_key)
+
+MODEL = os.getenv("PROFILE_PRESENTER_MODEL", "claude-3-5-haiku-latest")
+
+KNOWLEDGE_DIR = Path("knowledge")
+QUESTION_LOG_FILE = KNOWLEDGE_DIR / "university_questions.json"
+AUDIT_LOG_FILE = KNOWLEDGE_DIR / "profile_presenter_audit.json"
+
+
+PROFILE_PRESENTER_CONSTITUTION = """
+You are Korgut, a university-facing admissions profile presenter.
+
+You serve the university officer, not the student.
+Your job is to explain whether a student is worth attention.
+
+Rules:
+- Be honest about weaknesses.
+- Use only profile data.
+- Do not invent missing data.
+- Keep answers short.
+- Mention missing fields clearly.
+- Help the officer decide whether to invite, reject, or ask follow-up questions.
+"""
+
+
+class ProfilePresenterAgent:
+    def __init__(self, university_id: str):
+        self.university_id = university_id
+        KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _safe_read_json(self, file_path: Path, default):
+        if not file_path.exists():
+            return default
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        except json.JSONDecodeError as e:
+            self._audit_failure(
+                event="json_decode_error",
+                message=f"Invalid JSON in {file_path}",
+                details=str(e),
+            )
+            return default
+
+        except UnicodeDecodeError as e:
+            self._audit_failure(
+                event="unicode_decode_error",
+                message=f"UTF-8 decoding failed for {file_path}",
+                details=str(e),
+            )
+            return default
+
+        except Exception as e:
+            self._audit_failure(
+                event="json_read_error",
+                message=f"Failed to read {file_path}",
+                details=str(e),
+            )
+            return default
+
+    def _safe_write_json(self, file_path: Path, data):
+        try:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+
+        except Exception as e:
+            self._audit_failure(
+                event="json_write_error",
+                message=f"Failed to write {file_path}",
+                details=str(e),
+            )
+
+    def _audit_failure(
+        self,
+        event: str,
+        message: str,
+        details: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        question: Optional[str] = None,
+    ):
+        audit_data = self._safe_read_json(AUDIT_LOG_FILE, [])
+
+        audit_data.append({
+            "event": event,
+            "message": message,
+            "details": details,
+            "university_id": self.university_id,
+            "profile_name": profile_name,
+            "question": question,
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        try:
+            with open(AUDIT_LOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(audit_data, f, indent=4, ensure_ascii=False)
+        except Exception:
+            print(f"[AUDIT FAILURE] {event}: {message} | {details}")
+
+    def _detect_topic(self, question: str) -> str:
+        q = question.lower()
+
+        topics = {
+            "gpa": ["gpa", "cgpa", "grade", "academic"],
+            "research": ["research", "paper", "publication"],
+            "funding": ["fund", "scholarship", "budget", "cost", "money"],
+            "skills": ["skill", "github", "project", "code", "technical"],
+            "interview": ["interview", "communication"],
+            "work": ["work", "internship", "experience", "job"],
+            "fit": ["fit", "match", "recommend", "suitable", "why"],
+        }
+
+        for topic, words in topics.items():
+            if any(w in q for w in words):
+                return topic
+
+        return "general"
+
+    def _log_question(self, question: str, profile: Dict[str, Any]):
+        data = self._safe_read_json(QUESTION_LOG_FILE, [])
+
+        data.append({
+            "university_id": self.university_id,
+            "student_name": profile.get("name", "Unknown"),
+            "question": question,
+            "topic": self._detect_topic(question),
+            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        self._safe_write_json(QUESTION_LOG_FILE, data)
+
+    def _missing_fields(self, profile: Dict[str, Any]) -> List[str]:
+        important_fields = [
+            "name",
+            "email",
+            "institution",
+            "major",
+            "graduation_year",
+            "gpa",
+            "gpa_scale",
+            "skills",
+            "projects",
+            "research",
+            "work_months",
+            "budget",
+        ]
+
+        missing = []
+
+        for field in important_fields:
+            value = profile.get(field)
+
+            if value is None or value == "" or value == []:
+                missing.append(field)
+
+        return missing
+
+    def _profile_context(self, profile: Dict[str, Any]) -> str:
+        assessment = profile.get("assessments", {}).get(self.university_id, {})
+
+        compact_profile = {
+            "name": profile.get("name"),
+            "email": profile.get("email"),
+            "institution": profile.get("institution"),
+            "major": profile.get("major"),
+            "graduation_year": profile.get("graduation_year"),
+            "gpa": profile.get("gpa"),
+            "gpa_scale": profile.get("gpa_scale"),
+            "gre_quant": profile.get("gre_quant"),
+            "gre_verbal": profile.get("gre_verbal"),
+            "toefl": profile.get("toefl"),
+            "budget": profile.get("budget"),
+            "work_months": profile.get("work_months"),
+            "research": profile.get("research"),
+            "disciplines": profile.get("disciplines", []),
+            "skills": profile.get("skills", [])[:15],
+            "projects": profile.get("projects", [])[:5],
+            "notes": profile.get("notes"),
+            "missing_fields": self._missing_fields(profile),
+            "assessment": assessment,
+        }
+
+        return json.dumps(compact_profile, indent=2, ensure_ascii=False)
+
+    def answer(
+        self,
+        question: str,
+        profile: Dict[str, Any],
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+    ) -> str:
+        conversation_history = conversation_history or []
+
+        try:
+            self._log_question(question, profile)
+
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=350,
+                system=(
+                    PROFILE_PRESENTER_CONSTITUTION
+                    + "\n\nPROFILE:\n"
+                    + self._profile_context(profile)
+                ),
+                messages=conversation_history + [
+                    {
+                        "role": "user",
+                        "content": question,
+                    }
+                ],
+            )
+
+            if not response.content or not response.content[0].text:
+                self._audit_failure(
+                    event="empty_claude_response",
+                    message="Claude returned an empty response.",
+                    profile_name=profile.get("name"),
+                    question=question,
+                )
+
+                return (
+                    "Audit error: Claude returned an empty response. "
+                    "Please check the profile data or retry the request."
+                )
+
+            return response.content[0].text
+
+        except anthropic.APIConnectionError as e:
+            self._audit_failure(
+                event="claude_connection_error",
+                message="Claude API connection failed.",
+                details=str(e),
+                profile_name=profile.get("name"),
+                question=question,
+            )
+
+            return "Audit error: Claude API connection failed. Please check internet/API availability."
+
+        except anthropic.AuthenticationError as e:
+            self._audit_failure(
+                event="claude_authentication_error",
+                message="Claude authentication failed. Check ANTHROPIC_API_KEY.",
+                details=str(e),
+                profile_name=profile.get("name"),
+                question=question,
+            )
+
+            return "Audit error: Claude authentication failed. Please check ANTHROPIC_API_KEY."
+
+        except anthropic.RateLimitError as e:
+            self._audit_failure(
+                event="claude_rate_limit_error",
+                message="Claude rate limit reached.",
+                details=str(e),
+                profile_name=profile.get("name"),
+                question=question,
+            )
+
+            return "Audit error: Claude rate limit reached. Please retry after some time."
+
+        except anthropic.APIError as e:
+            self._audit_failure(
+                event="claude_api_error",
+                message="Claude API failed while generating profile answer.",
+                details=str(e),
+                profile_name=profile.get("name"),
+                question=question,
+            )
+
+            return "Audit error: Claude API failed while generating the profile answer."
+
+        except Exception as e:
+            self._audit_failure(
+                event="profile_presenter_error",
+                message="Unexpected error in ProfilePresenterAgent.",
+                details=str(e),
+                profile_name=profile.get("name"),
+                question=question,
+            )
+
+            return f"Audit error: Profile presenter failed clearly instead of silently. Details: {str(e)}"

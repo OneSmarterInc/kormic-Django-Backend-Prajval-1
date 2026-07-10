@@ -1,0 +1,221 @@
+from django.db import models
+
+
+class StudentProfile(models.Model):
+    """
+    Persistent student profile, replacing the previous profiles/<student_id>.json file store.
+
+    Fields that always have a well-known scalar shape are modeled as real
+    columns. Nested/list structures produced by the various agents (resume
+    parser, GitHub/LinkedIn analysis, fit assessments, roadmap planner, etc.)
+    are modeled as dedicated JSON columns. `extra_data` is an overflow bucket
+    for any additional keys those AI-driven agents may attach to a profile
+    that aren't covered by an explicit column, so no data is ever dropped.
+    """
+
+    student_id = models.CharField(max_length=255, unique=True, db_index=True)
+
+    name = models.CharField(max_length=255, blank=True, default="")
+    email = models.CharField(max_length=255, blank=True, default="")
+    country = models.CharField(max_length=255, blank=True, default="")
+    institution = models.CharField(max_length=500, blank=True, default="")
+    major = models.CharField(max_length=255, blank=True, default="")
+    program = models.CharField(max_length=255, blank=True, default="")
+    graduation_year = models.IntegerField(null=True, blank=True)
+
+    gpa = models.FloatField(null=True, blank=True)
+    gpa_scale = models.CharField(max_length=50, blank=True, default="")
+    gpa_text = models.CharField(max_length=100, blank=True, default="")
+
+    gre_quant = models.FloatField(null=True, blank=True)
+    gre_verbal = models.FloatField(null=True, blank=True)
+    toefl = models.FloatField(null=True, blank=True)
+    ielts = models.FloatField(null=True, blank=True)
+    english_score_text = models.CharField(max_length=100, blank=True, default="")
+
+    budget = models.FloatField(null=True, blank=True)
+    budget_text = models.CharField(max_length=100, blank=True, default="")
+    work_months = models.FloatField(null=True, blank=True, default=0)
+
+    github = models.CharField(max_length=500, blank=True, default="")
+    github_assessment = models.JSONField(default=dict, blank=True)
+
+    linkedin_url = models.CharField(max_length=500, blank=True, default="")
+    linkedin_profile = models.JSONField(default=dict, blank=True)
+
+    notes = models.TextField(blank=True, default="")
+    source = models.CharField(max_length=100, blank=True, default="api")
+    verified = models.BooleanField(default=False)
+
+    skills = models.JSONField(default=list, blank=True)
+    technical_skills = models.JSONField(default=list, blank=True)
+    soft_skills = models.JSONField(default=list, blank=True)
+
+    projects = models.JSONField(default=list, blank=True)
+
+    research = models.TextField(blank=True, default="")
+    research_interests = models.JSONField(default=list, blank=True)
+    publications = models.JSONField(default=list, blank=True)
+    publications_count = models.IntegerField(null=True, blank=True)
+
+    career_goals = models.JSONField(default=list, blank=True)
+    conversation_insights = models.JSONField(default=list, blank=True)
+    assessments = models.JSONField(default=dict, blank=True)
+    preferences = models.JSONField(default=dict, blank=True)
+    evidence = models.JSONField(default=dict, blank=True)
+
+    academic_intelligence = models.JSONField(default=dict, blank=True)
+    technical_intelligence = models.JSONField(default=dict, blank=True)
+    research_intelligence = models.JSONField(default=dict, blank=True)
+    behaviour_intelligence = models.JSONField(default=dict, blank=True)
+
+    overall_profile_score = models.IntegerField(default=0, blank=True)
+    overall_profile = models.JSONField(default=dict, blank=True)
+    profile_completeness = models.JSONField(default=dict, blank=True)
+
+    strengths = models.JSONField(default=list, blank=True)
+    weaknesses = models.JSONField(default=list, blank=True)
+    recommendations = models.JSONField(default=list, blank=True)
+
+    ai_summary = models.TextField(blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+
+    roadmap = models.JSONField(default=dict, blank=True)
+
+    disciplines = models.JSONField(default=list, blank=True)
+    gaps = models.JSONField(default=list, blank=True)
+    parser_status = models.CharField(max_length=100, blank=True, default="")
+    parser_engine = models.CharField(max_length=100, blank=True, default="")
+    response_mode = models.CharField(max_length=100, blank=True, default="")
+    work_experience_summary = models.TextField(blank=True, default="")
+
+    extra_data = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at"]
+
+    def __str__(self) -> str:
+        return f"StudentProfile({self.student_id})"
+
+
+class IntakeSession(models.Model):
+    """
+    Profile-intake chat session state, replacing data/api_intake_sessions.json.
+    """
+
+    student_key = models.CharField(max_length=255, unique=True, db_index=True)
+    student_id = models.CharField(max_length=255)
+    step = models.IntegerField(default=0)
+    completed = models.BooleanField(default=False)
+    answers = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"IntakeSession({self.student_key}, step={self.step}, completed={self.completed})"
+
+
+class ChatMessage(models.Model):
+    """
+    Persistent per-turn chat transcript for Aria, university, profile-presenter,
+    and intake chat, replacing the in-process-only ARIA_SESSIONS / UNIVERSITY_AGENTS
+    / PROFILE_PRESENTERS dicts that were lost on every server restart.
+
+    student_id/university_id are plain strings (not FKs) since a chat turn can
+    happen before a StudentProfile row is ever saved.
+    """
+
+    class Channel(models.TextChoices):
+        ARIA = "aria", "Aria"
+        UNIVERSITY = "university", "University"
+        PRESENTER = "presenter", "Presenter"
+        INTAKE = "intake", "Intake"
+
+    class Sender(models.TextChoices):
+        USER = "user", "User"
+        ASSISTANT = "assistant", "Assistant"
+
+    channel = models.CharField(max_length=20, choices=Channel.choices, db_index=True)
+    student_id = models.CharField(max_length=255, db_index=True)
+    university_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    sender = models.CharField(max_length=20, choices=Sender.choices)
+    content = models.TextField()
+    meta = models.JSONField(default=dict, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self) -> str:
+        return f"ChatMessage({self.channel}, {self.student_id}, {self.sender})"
+
+
+class ResumeUpload(models.Model):
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="resume_uploads")
+    file_path = models.CharField(max_length=1000)
+    original_filename = models.CharField(max_length=500)
+    extracted_data = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"ResumeUpload({self.student.student_id}, {self.original_filename})"
+
+
+class GitHubAnalysis(models.Model):
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="github_analyses")
+    github_url = models.CharField(max_length=500)
+    result = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"GitHubAnalysis({self.student.student_id}, {self.github_url})"
+
+
+class LinkedInAnalysis(models.Model):
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="linkedin_analyses")
+    image_paths = models.JSONField(default=list, blank=True)
+    extracted = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"LinkedInAnalysis({self.student.student_id})"
+
+
+class FitAssessment(models.Model):
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="fit_assessments")
+    university_id = models.CharField(max_length=255, db_index=True)
+    assessment = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"FitAssessment({self.student.student_id}, {self.university_id})"
+
+
+class RoadmapVersion(models.Model):
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="roadmap_versions")
+    request_message = models.TextField(blank=True, default="")
+    roadmap = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"RoadmapVersion({self.student.student_id})"

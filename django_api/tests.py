@@ -1,0 +1,195 @@
+from unittest import mock
+
+import pyotp
+from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APIClient
+
+from django_api import views as django_api_views
+from django_api.models import FitAssessment, ResumeUpload, StudentProfile
+
+
+def _reset_inprocess_agent_caches():
+    # ARIA_SESSIONS / UNIVERSITY_AGENTS / PROFILE_PRESENTERS are plain
+    # module-level dicts that persist across TestCase classes within the
+    # same test process -- clear them so a mocked agent from one test
+    # doesn't leak into another via the get_*_agent() cache lookup.
+    django_api_views.ARIA_SESSIONS.clear()
+    django_api_views.UNIVERSITY_AGENTS.clear()
+    django_api_views.PROFILE_PRESENTERS.clear()
+
+
+def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):
+    payload = {"email": email, "password": password, "role": role, "name": "Test User"}
+    payload.update(extra)
+    client.post("/api/auth/register/", payload, format="json")
+
+    access = client.post("/api/auth/login/", {"email": email, "password": password}, format="json").data["access"]
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+    secret = client.post("/api/auth/totp/enroll/").data["secret"]
+    code = pyotp.TOTP(secret).now()
+    client.post("/api/auth/totp/verify-enrollment/", {"code": code}, format="json")
+
+    client.credentials()
+    mfa_token = client.post("/api/auth/login/", {"email": email, "password": password}, format="json").data[
+        "mfa_token"
+    ]
+    code = pyotp.TOTP(secret).now()
+    tokens = client.post("/api/auth/verify-totp/", {"mfa_token": mfa_token, "code": code}, format="json").data
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {tokens['access']}")
+    return tokens
+
+
+def make_student_client(email="student_a@example.com", student_id="student_a"):
+    client = APIClient()
+    _register_and_enroll(client, role="student", email=email, student_id=student_id)
+    return client
+
+
+def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs"):
+    client = APIClient()
+    _register_and_enroll(client, role="university", email=email, university_id=university_id)
+    return client
+
+
+class OwnershipTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.student_a = make_student_client(email="a@example.com", student_id="student_a")
+        self.student_b = make_student_client(email="b@example.com", student_id="student_b")
+        self.officer_wsu = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
+        self.officer_franklin = make_university_client(email="officer1@franklin.edu", university_id="franklin_cs")
+
+    def test_student_can_create_and_read_own_profile(self):
+        resp = self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["student_id"], "student_a")
+
+        get_resp = self.student_a.get("/api/profile/student_a/")
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
+
+    def test_student_cannot_read_other_students_profile(self):
+        self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
+        resp = self.student_b.get("/api/profile/student_a/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_client_supplied_student_id_is_ignored(self):
+        resp = self.student_a.post("/api/profile/", {"student_id": "student_b", "name": "Alice"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["student_id"], "student_a")
+        self.assertFalse(StudentProfile.objects.filter(student_id="student_b").exists())
+
+    def test_university_officer_can_read_own_dashboard(self):
+        resp = self.officer_wsu.get("/api/university/wright_state_cs/profiles/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
+    def test_university_officer_cannot_read_other_universitys_dashboard(self):
+        resp = self.officer_wsu.get("/api/university/franklin_cs/profiles/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_student_token_rejected_on_university_only_endpoint(self):
+        resp = self.student_a.get("/api/university/wright_state_cs/profiles/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_university_token_rejected_on_student_only_endpoint(self):
+        self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
+        resp = self.officer_wsu.get("/api/profile/student_a/")
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unauthenticated_requests_now_rejected(self):
+        anon = APIClient()
+        resp = anon.get("/api/profile/student_a/")
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+
+class ChatHistoryTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student = make_student_client(email="c@example.com", student_id="student_c")
+        self.student.post("/api/profile/", {"name": "Carol"}, format="json")
+
+    @mock.patch("agents.student_agent.StudentAgent")
+    def test_aria_chat_persists_and_returns_history(self, MockStudentAgent):
+        instance = MockStudentAgent.return_value
+        instance.chat.side_effect = ["Hi there!", "Sure, here's more info."]
+        instance.student_profile = {"student_id": "student_c"}
+
+        self.student.post("/api/chat/aria/", {"message": "Hello"}, format="json")
+        self.student.post("/api/chat/aria/", {"message": "Tell me more"}, format="json")
+
+        history = self.student.get("/api/chat/aria/history/")
+        self.assertEqual(history.status_code, status.HTTP_200_OK)
+        self.assertEqual(history.data["count"], 4)
+        senders = [m["sender"] for m in history.data["messages"]]
+        self.assertEqual(senders, ["user", "assistant", "user", "assistant"])
+
+    @mock.patch("agents.university_agent.UniversityAgent")
+    def test_university_chat_history_scoped_per_university(self, MockUniversityAgent):
+        instance = MockUniversityAgent.return_value
+        instance.answer.return_value = {
+            "agent_name": "Raider",
+            "university": "Wright State",
+            "answer": "The min GPA is 3.0.",
+            "pending": False,
+            "confidence": 0.9,
+        }
+
+        self.student.post("/api/chat/university/wright_state_cs/", {"message": "GPA requirement?"}, format="json")
+
+        wsu_history = self.student.get("/api/chat/university/wright_state_cs/history/")
+        self.assertEqual(wsu_history.data["count"], 2)
+
+        franklin_history = self.student.get("/api/chat/university/franklin_cs/history/")
+        self.assertEqual(franklin_history.data["count"], 0)
+
+
+class SubResourceHistoryTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student = make_student_client(email="d@example.com", student_id="student_d")
+        self.student.post("/api/profile/", {"name": "Dave"}, format="json")
+        self.officer_wsu = make_university_client(email="officer2@wsu.edu", university_id="wright_state_cs")
+        self.officer_franklin = make_university_client(email="officer2@franklin.edu", university_id="franklin_cs")
+
+    @mock.patch("agents.resume_parser.ResumeParserAgent")
+    def test_resume_upload_history_accumulates_without_overwriting_files(self, MockParser):
+        MockParser.return_value.parse.return_value = {"skills": ["Python"]}
+
+        file1 = SimpleUploadedFile("resume.pdf", b"first-version", content_type="application/pdf")
+        file2 = SimpleUploadedFile("resume.pdf", b"second-version", content_type="application/pdf")
+
+        self.student.post("/api/profile/resume/", {"file": file1}, format="multipart")
+        self.student.post("/api/profile/resume/", {"file": file2}, format="multipart")
+
+        rows = ResumeUpload.objects.filter(student__student_id="student_d")
+        self.assertEqual(rows.count(), 2)
+        file_paths = {r.file_path for r in rows}
+        self.assertEqual(len(file_paths), 2)  # distinct on-disk paths, no clobbering
+
+        resp = self.student.get("/api/profile/student_d/resumes/")
+        self.assertEqual(resp.data["count"], 2)
+
+    @mock.patch("agents.university_agent.UniversityAgent")
+    def test_fit_assessment_history_dual_mode_visibility(self, MockUniversityAgent):
+        instance = MockUniversityAgent.return_value
+        instance.assess_fit.return_value = {"match_tier": "target", "match_score": 70}
+
+        self.student.post("/api/assessments/generate/wright_state_cs/")
+        self.student.post("/api/assessments/generate/franklin_cs/")
+
+        student_view = self.student.get("/api/assessments/student_d/")
+        self.assertEqual(student_view.data["count"], 2)
+
+        wsu_view = self.officer_wsu.get("/api/assessments/student_d/")
+        self.assertEqual(wsu_view.data["count"], 1)
+        self.assertEqual(wsu_view.data["assessments"][0]["university_id"], "wright_state_cs")
+
+        franklin_view = self.officer_franklin.get("/api/assessments/student_d/")
+        self.assertEqual(franklin_view.data["count"], 1)
+        self.assertEqual(franklin_view.data["assessments"][0]["university_id"], "franklin_cs")
+
+        self.assertEqual(FitAssessment.objects.filter(student__student_id="student_d").count(), 2)
