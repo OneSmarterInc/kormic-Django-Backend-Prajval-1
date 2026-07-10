@@ -1,17 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from unittest import mock
 
 import pyotp
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from accounts.models import Account
 from django_api.models import StudentProfile
 from identity_verification.crypto import aes_gcm
 from identity_verification.crypto.canonical import canonical_bytes, canonical_json
@@ -100,11 +99,11 @@ class IdentityVerificationApiTests(TestCase):
         self.assertFalse(IdentityVerificationSession.objects.filter(account__student_id="evil").exists())
 
     def test_another_student_cannot_read_or_complete_session(self):
-        response, session = self.create_session()
+        _, session = self.create_session()
         detail = self.other_student.get(f"/api/identity/sessions/{session.id}/")
         self.assertEqual(detail.status_code, status.HTTP_404_NOT_FOUND)
         complete = self.other_student.post(f"/api/identity/sessions/{session.id}/complete/", valid_completion_payload(session), format="json")
-        self.assertEqual(complete.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(complete.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_exact_challenge_order_accepted_and_profile_not_marked_verified(self):
         StudentProfile.objects.create(student_id="student_a", verified=False)
@@ -130,12 +129,27 @@ class IdentityVerificationApiTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertEqual(IdentityVerificationResult.objects.filter(session=session).count(), 1)
 
-    def test_expired_completion_rejected(self):
+    def test_expired_completion_rejected_and_status_persisted(self):
         _, session = self.create_session()
         session.expires_at = timezone.now() - timezone.timedelta(seconds=1)
         session.save(update_fields=["expires_at"])
         response = self.student.post(f"/api/identity/sessions/{session.id}/complete/", valid_completion_payload(session), format="json")
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        session.refresh_from_db()
+        self.assertEqual(session.status, IdentityVerificationSession.Status.EXPIRED)
+
+    def test_failed_result_is_terminal_and_cannot_become_passed(self):
+        _, session = self.create_session()
+        payload = valid_completion_payload(session, final="failed")
+        payload["challenge_results"][0]["passed"] = False
+        payload["failure_reason"] = "challenge_failed"
+        response = self.student.post(f"/api/identity/sessions/{session.id}/complete/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["status"], "failed")
+        replay = self.student.post(f"/api/identity/sessions/{session.id}/complete/", valid_completion_payload(session), format="json")
+        self.assertEqual(replay.status_code, status.HTTP_400_BAD_REQUEST)
+        session.refresh_from_db()
+        self.assertEqual(session.status, IdentityVerificationSession.Status.FAILED)
 
     def test_canceled_session_rejected(self):
         _, session = self.create_session()
@@ -174,7 +188,9 @@ class IdentityVerificationApiTests(TestCase):
         _, session = self.create_session()
         payload = valid_completion_payload(session)
         payload["session_nonce"] = "wrong"
-        self.assertEqual(self.student.post(f"/api/identity/sessions/{session.id}/complete/", payload, format="json").status_code, 400)
+        response = self.student.post(f"/api/identity/sessions/{session.id}/complete/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("session_nonce", response.data)
         payload = valid_completion_payload(session)
         payload["completed_at"] = (session.created_at - timezone.timedelta(seconds=1)).isoformat()
         self.assertEqual(self.student.post(f"/api/identity/sessions/{session.id}/complete/", payload, format="json").status_code, 400)
@@ -190,6 +206,19 @@ class IdentityVerificationApiTests(TestCase):
             format="multipart",
         )
         self.assertEqual(file_response.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+        create_multipart = self.student.post(
+            "/api/identity/sessions/",
+            {"file": SimpleUploadedFile("face.jpg", b"raw")},
+            format="multipart",
+        )
+        self.assertEqual(create_multipart.status_code, status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
+
+    def test_oversized_unexpected_field_rejected(self):
+        _, session = self.create_session()
+        payload = valid_completion_payload(session)
+        payload["app_version"] = "x" * 200
+        response = self.student.post(f"/api/identity/sessions/{session.id}/complete/", payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_device_biometric_preference_accepts_status_only(self):
         response = self.student.post(
@@ -199,6 +228,14 @@ class IdentityVerificationApiTests(TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(DeviceBiometricPreference.objects.get(account__student_id="student_a").status, "enabled")
+        updated = self.student.post(
+            "/api/identity/device-biometrics/",
+            {"status": "skipped", "platform": "ios", "app_version": "1.0.1"},
+            format="json",
+        )
+        self.assertEqual(updated.status_code, status.HTTP_200_OK)
+        self.assertEqual(DeviceBiometricPreference.objects.get(account__student_id="student_a").status, "skipped")
+        self.assertEqual(DeviceBiometricPreference.objects.filter(account__student_id="student_a").count(), 1)
         bad = self.student.post(
             "/api/identity/device-biometrics/",
             {"status": "enabled", "platform": "ios", "app_version": "1.0.0", "face_id_template": "secret"},
@@ -206,6 +243,26 @@ class IdentityVerificationApiTests(TestCase):
         )
         self.assertEqual(bad.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertFalse(StudentProfile.objects.filter(student_id="student_a", verified=True).exists())
+
+    def test_one_proof_per_result_database_constraint(self):
+        _, session = self.create_session()
+        response = self.student.post(f"/api/identity/sessions/{session.id}/complete/", valid_completion_payload(session), format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        result = session.result
+        existing = result.proof
+        with self.assertRaises(IntegrityError):
+            IdentityVerificationProof.objects.create(
+                session=session,
+                result=result,
+                student_code=existing.student_code,
+                verification_record_hash=existing.verification_record_hash,
+                current_head=existing.current_head,
+                freshness_timestamp=existing.freshness_timestamp,
+                challenge=existing.challenge,
+                signing_epoch=existing.signing_epoch,
+                signature=existing.signature,
+                authority_identifier=existing.authority_identifier,
+            )
 
 
 @override_settings(IDENTITY_ALLOW_DEV_KEY_CUSTODY=True, IDENTITY_CURRENT_SIGNING_EPOCH=1)
@@ -256,6 +313,11 @@ class IdentityCryptoTests(TestCase):
             self.assertEqual(newer["epoch"], 8)
             self.assertTrue(verify_proof_record(proof))
             self.assertTrue(verify_proof_record(newer))
+
+    @override_settings(DEBUG=False, IDENTITY_ALLOW_DEV_KEY_CUSTODY=False)
+    def test_production_cannot_use_dev_custody(self):
+        with self.assertRaises(RuntimeError):
+            SoftwareKeyCustody()
 
     def test_private_key_not_stored_in_models_and_chain_head_deterministic(self):
         field_names = {field.name for field in IdentityVerificationProof._meta.fields} | {field.name for field in IdentityVerificationSession._meta.fields}

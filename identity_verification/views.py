@@ -25,6 +25,8 @@ class IdentitySessionCreateView(APIView):
     throttle_scope = "identity"
 
     def post(self, request):
+        if request.content_type and not request.content_type.startswith("application/json"):
+            return Response({"detail": "Only application/json is accepted."}, status=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
         session = create_identity_session(request.user.account)
         return Response(IdentitySessionSerializer(session).data, status=status.HTTP_201_CREATED)
 

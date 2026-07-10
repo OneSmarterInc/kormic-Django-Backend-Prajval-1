@@ -79,7 +79,7 @@ class IdentityVerificationResult(models.Model):
 
 class IdentityVerificationProof(models.Model):
     session = models.ForeignKey(IdentityVerificationSession, on_delete=models.CASCADE, related_name="proofs")
-    result = models.ForeignKey(IdentityVerificationResult, on_delete=models.CASCADE, related_name="proofs")
+    result = models.OneToOneField(IdentityVerificationResult, on_delete=models.CASCADE, related_name="proof")
     student_code = models.CharField(max_length=255, db_index=True)
     verification_record_hash = models.CharField(max_length=128, db_index=True)
     current_head = models.CharField(max_length=128, db_index=True)
@@ -116,4 +116,5 @@ class DeviceBiometricPreference(models.Model):
 
     def __str__(self) -> str:
         return f"DeviceBiometricPreference({self.account_id}, {self.status})"
+
 

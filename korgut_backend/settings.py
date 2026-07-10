@@ -13,6 +13,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from datetime import timedelta
 from pathlib import Path
 import os
+import sys
 
 from django.db.backends.signals import connection_created
 from dotenv import load_dotenv
@@ -211,9 +212,12 @@ CACHES = {
 # Identity verification settings. Software custody is for development/tests only;
 # production must provide an HSM-backed custody backend and a 32-byte AES key.
 IDENTITY_SESSION_TTL_SECONDS = int(os.getenv("IDENTITY_SESSION_TTL_SECONDS", "300"))
-IDENTITY_AES_KEY_B64 = os.getenv("IDENTITY_AES_KEY_B64", "")
-IDENTITY_CURRENT_SIGNING_EPOCH = int(os.getenv("IDENTITY_CURRENT_SIGNING_EPOCH", "1"))
+IDENTITY_AES_KEY_B64 = os.getenv("IDENTITY_AES_KEY_B64") or os.getenv("IDENTITY_AES_KEY", "")
+IDENTITY_CURRENT_SIGNING_EPOCH = int(os.getenv("IDENTITY_CURRENT_SIGNING_EPOCH", os.getenv("IDENTITY_SIGNING_EPOCH", "1")))
 IDENTITY_AUTHORITY_IDENTIFIER = os.getenv("IDENTITY_AUTHORITY_IDENTIFIER", "kormic-dev-authority")
 IDENTITY_KEY_CUSTODY_BACKEND = os.getenv("IDENTITY_KEY_CUSTODY_BACKEND", "software-dev")
-IDENTITY_ALLOW_DEV_KEY_CUSTODY = os.getenv("IDENTITY_ALLOW_DEV_KEY_CUSTODY", "1" if DEBUG else "0") == "1"
+_identity_dev_context = DEBUG or "test" in sys.argv or os.getenv("PYTEST_CURRENT_TEST") is not None
+_identity_dev_requested = os.getenv("IDENTITY_ALLOW_DEV_KEY_CUSTODY", "1" if _identity_dev_context else "0") == "1"
+IDENTITY_ALLOW_DEV_KEY_CUSTODY = _identity_dev_context and _identity_dev_requested
 REST_FRAMEWORK["DEFAULT_THROTTLE_RATES"]["identity"] = os.getenv("IDENTITY_THROTTLE_RATE", "20/min")
+

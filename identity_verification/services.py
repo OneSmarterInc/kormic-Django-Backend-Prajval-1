@@ -4,6 +4,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from rest_framework import serializers
+from rest_framework.exceptions import NotFound
 
 from accounts.models import Account
 from identity_verification.crypto import aes_gcm
@@ -25,11 +26,20 @@ def create_identity_session(account: Account) -> IdentityVerificationSession:
 
 
 def complete_identity_session(*, account: Account, session_id, payload: dict) -> tuple[IdentityVerificationSession, IdentityVerificationResult, IdentityVerificationProof]:
+    try:
+        precheck_session = IdentityVerificationSession.objects.get(id=session_id, account=account)
+    except IdentityVerificationSession.DoesNotExist as exc:
+        raise NotFound("Verification session not found.") from exc
+
+    if precheck_session.expires_at <= timezone.now() and not precheck_session.consumed_at:
+        IdentityVerificationSession.objects.filter(id=precheck_session.id).update(status=IdentityVerificationSession.Status.EXPIRED)
+        raise serializers.ValidationError({"session": "Verification session has expired."})
+
     with transaction.atomic():
         try:
             session = IdentityVerificationSession.objects.select_for_update().get(id=session_id, account=account)
         except IdentityVerificationSession.DoesNotExist as exc:
-            raise serializers.ValidationError({"detail": "Verification session not found."}) from exc
+            raise NotFound("Verification session not found.") from exc
 
         session.attempt_count += 1
         session.save(update_fields=["attempt_count"])
