@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -38,6 +39,7 @@ from django_api.serializers import (
     GitHubAnalyzeSerializer,
 )
 from django_api.services import (
+    UPLOADS_DIR,
     create_or_update_profile,
     get_profile,
     parse_resume,
@@ -99,8 +101,12 @@ def api_home(request):
             "create_update_profile": "POST /api/profile/",
             "get_profile": "GET /api/profile/<student_id>/",
             "resume": "POST /api/profile/resume/",
+            "resume_download": "GET /api/profile/resume/<resume_id>/",
+            "resume_delete": "DELETE /api/profile/resume/<resume_id>/",
             "github": "POST /api/profile/github/",
             "linkedin": "POST /api/profile/linkedin/",
+            "linkedin_history": "GET /api/profile/<student_id>/linkedin-history/",
+            "linkedin_image": "GET /api/profile/linkedin/<analysis_id>/images/<index>/",
         },
         "chat_apis": {
             "profile_intake": "POST /api/chat/intake/",
@@ -345,6 +351,54 @@ class ResumeUploadAPIView(APIView):
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class ResumeDetailAPIView(APIView):
+    """
+    GET /api/profile/resume/<resume_id>/ — download the original resume file.
+    DELETE /api/profile/resume/<resume_id>/ — remove a resume upload (file + row).
+    """
+
+    permission_classes = STUDENT_PERMISSIONS
+
+    def _get_owned_resume(self, request, resume_id):
+        try:
+            resume = ResumeUpload.objects.select_related("student").get(pk=resume_id)
+        except ResumeUpload.DoesNotExist:
+            return None, api_error("Resume not found.", status.HTTP_404_NOT_FOUND)
+
+        if resume.student.student_id != request.user.account.student_id:
+            return None, api_error("You may only access your own resumes.", status.HTTP_403_FORBIDDEN)
+
+        return resume, None
+
+    def get(self, request, resume_id):
+        resume, error_response = self._get_owned_resume(request, resume_id)
+        if error_response:
+            return error_response
+
+        file_path = Path(resume.file_path)
+        if not file_path.exists():
+            return api_error("Resume file is missing on the server.", status.HTTP_404_NOT_FOUND)
+
+        # Read fully into memory rather than handing FileResponse an open
+        # file handle: on Windows an open handle blocks a same-request-cycle
+        # delete/unlink of that file, and this keeps the handle short-lived
+        # regardless of platform.
+        content = file_path.read_bytes()
+        return FileResponse(io.BytesIO(content), as_attachment=True, filename=resume.original_filename)
+
+    def delete(self, request, resume_id):
+        resume, error_response = self._get_owned_resume(request, resume_id)
+        if error_response:
+            return error_response
+
+        file_path = Path(resume.file_path)
+        if file_path.exists():
+            file_path.unlink(missing_ok=True)
+
+        resume.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
 class GitHubAnalyzeAPIView(APIView):
     """
     POST /api/profile/github/
@@ -382,10 +436,38 @@ class GitHubAnalyzeAPIView(APIView):
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def build_linkedin_images_payload(analysis_id: int, image_paths):
+    """
+    Turns the absolute on-disk paths stored on a LinkedInAnalysis row into a
+    frontend-usable shape: a path relative to the uploads/media root (no
+    server filesystem layout leaked) plus an authenticated download URL
+    (raw MEDIA_URL static serving isn't used here since these screenshots
+    are private -- serving must stay behind the same JWT+ownership check as
+    the rest of the API).
+    """
+    payload = []
+
+    for index, path in enumerate(image_paths or []):
+        try:
+            media_path = Path(path).resolve().relative_to(UPLOADS_DIR.resolve()).as_posix()
+        except ValueError:
+            media_path = Path(path).name
+
+        payload.append({
+            "index": index,
+            "media_path": media_path,
+            "url": f"/api/profile/linkedin/{analysis_id}/images/{index}/",
+        })
+
+    return payload
+
+
 class LinkedInAnalyzeAPIView(APIView):
     """
     POST /api/profile/linkedin/
-    Upload LinkedIn screenshots and update profile.
+    Upload LinkedIn screenshots and update profile. Safe to call again later
+    to add more screenshots -- each call is a new history entry (same
+    pattern as repeated resume uploads), nothing is overwritten.
     """
 
     permission_classes = STUDENT_PERMISSIONS
@@ -403,7 +485,8 @@ class LinkedInAnalyzeAPIView(APIView):
                 {
                     "status": "success",
                     "student_id": result["student_id"],
-                    "image_paths": result["image_paths"],
+                    "analysis_id": result["analysis_id"],
+                    "images": build_linkedin_images_payload(result["analysis_id"], result["image_paths"]),
                     "skills_added": result["skills_added"],
                     "extracted": result["extracted"],
                 },
@@ -411,6 +494,35 @@ class LinkedInAnalyzeAPIView(APIView):
             )
         except Exception as exc:
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class LinkedInImageDetailAPIView(APIView):
+    """
+    GET /api/profile/linkedin/<analysis_id>/images/<index>/
+    Streams one uploaded LinkedIn screenshot, scoped to the owning student.
+    """
+
+    permission_classes = STUDENT_PERMISSIONS
+
+    def get(self, request, analysis_id, index):
+        try:
+            analysis = LinkedInAnalysis.objects.select_related("student").get(pk=analysis_id)
+        except LinkedInAnalysis.DoesNotExist:
+            return api_error("LinkedIn analysis not found.", status.HTTP_404_NOT_FOUND)
+
+        if analysis.student.student_id != request.user.account.student_id:
+            return api_error("You may only access your own LinkedIn images.", status.HTTP_403_FORBIDDEN)
+
+        image_paths = analysis.image_paths or []
+        if index < 0 or index >= len(image_paths):
+            return api_error("Image index out of range.", status.HTTP_404_NOT_FOUND)
+
+        file_path = Path(image_paths[index])
+        if not file_path.exists():
+            return api_error("Image file is missing on the server.", status.HTTP_404_NOT_FOUND)
+
+        content = file_path.read_bytes()
+        return FileResponse(io.BytesIO(content), as_attachment=False, filename=file_path.name)
 
 
 # ---------------------------------------------------------------------
@@ -974,6 +1086,7 @@ class ResumeHistoryView(APIView):
             "count": rows.count(),
             "resumes": [
                 {
+                    "id": r.id,
                     "original_filename": r.original_filename,
                     "file_path": r.file_path,
                     "extracted_data": r.extracted_data,
@@ -1012,7 +1125,12 @@ class LinkedInHistoryView(APIView):
             "student_id": student_id,
             "count": rows.count(),
             "analyses": [
-                {"image_paths": r.image_paths, "extracted": r.extracted, "created_at": r.created_at}
+                {
+                    "id": r.id,
+                    "images": build_linkedin_images_payload(r.id, r.image_paths),
+                    "extracted": r.extracted,
+                    "created_at": r.created_at,
+                }
                 for r in rows
             ],
         })

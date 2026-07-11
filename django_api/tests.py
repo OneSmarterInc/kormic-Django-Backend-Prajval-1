@@ -9,6 +9,7 @@ from rest_framework.test import APIClient
 
 from django_api import views as django_api_views
 from django_api.models import FitAssessment, ResumeUpload, StudentProfile
+from django_api.services import make_student_id
 
 
 def _reset_inprocess_agent_caches():
@@ -42,10 +43,10 @@ def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **e
     return tokens
 
 
-def make_student_client(email="student_a@example.com", student_id="student_a"):
+def make_student_client(email="student_a@example.com"):
     client = APIClient()
-    _register_and_enroll(client, role="student", email=email, student_id=student_id)
-    return client
+    _register_and_enroll(client, role="student", email=email)
+    return client, make_student_id(email)
 
 
 def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs"):
@@ -57,29 +58,48 @@ def make_university_client(email="officer_a@wsu.edu", university_id="wright_stat
 class OwnershipTests(TestCase):
     def setUp(self):
         cache.clear()
-        self.student_a = make_student_client(email="a@example.com", student_id="student_a")
-        self.student_b = make_student_client(email="b@example.com", student_id="student_b")
+        self.student_a, self.student_a_id = make_student_client(email="a@example.com")
+        self.student_b, self.student_b_id = make_student_client(email="b@example.com")
         self.officer_wsu = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
         self.officer_franklin = make_university_client(email="officer1@franklin.edu", university_id="franklin_cs")
 
     def test_student_can_create_and_read_own_profile(self):
         resp = self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["student_id"], "student_a")
+        self.assertEqual(resp.data["student_id"], self.student_a_id)
 
-        get_resp = self.student_a.get("/api/profile/student_a/")
+        get_resp = self.student_a.get(f"/api/profile/{self.student_a_id}/")
         self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
 
     def test_student_cannot_read_other_students_profile(self):
         self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
-        resp = self.student_b.get("/api/profile/student_a/")
+        resp = self.student_b.get(f"/api/profile/{self.student_a_id}/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_client_supplied_student_id_is_ignored(self):
-        resp = self.student_a.post("/api/profile/", {"student_id": "student_b", "name": "Alice"}, format="json")
+        resp = self.student_a.post(
+            "/api/profile/", {"student_id": self.student_b_id, "name": "Alice"}, format="json"
+        )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["student_id"], "student_a")
-        self.assertFalse(StudentProfile.objects.filter(student_id="student_b").exists())
+        self.assertEqual(resp.data["student_id"], self.student_a_id)
+        self.assertFalse(StudentProfile.objects.filter(student_id=self.student_b_id).exists())
+
+    def test_blank_numeric_fields_do_not_400(self):
+        resp = self.student_a.post(
+            "/api/profile/",
+            {
+                "name": "Alice",
+                "graduation_year": "",
+                "gpa": "",
+                "gre_quant": "",
+                "gre_verbal": "",
+                "toefl": "",
+                "ielts": "",
+                "budget": "",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_university_officer_can_read_own_dashboard(self):
         resp = self.officer_wsu.get("/api/university/wright_state_cs/profiles/")
@@ -95,12 +115,12 @@ class OwnershipTests(TestCase):
 
     def test_university_token_rejected_on_student_only_endpoint(self):
         self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
-        resp = self.officer_wsu.get("/api/profile/student_a/")
+        resp = self.officer_wsu.get(f"/api/profile/{self.student_a_id}/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_unauthenticated_requests_now_rejected(self):
         anon = APIClient()
-        resp = anon.get("/api/profile/student_a/")
+        resp = anon.get(f"/api/profile/{self.student_a_id}/")
         self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
 
 
@@ -108,14 +128,14 @@ class ChatHistoryTests(TestCase):
     def setUp(self):
         cache.clear()
         _reset_inprocess_agent_caches()
-        self.student = make_student_client(email="c@example.com", student_id="student_c")
+        self.student, self.student_id = make_student_client(email="c@example.com")
         self.student.post("/api/profile/", {"name": "Carol"}, format="json")
 
     @mock.patch("agents.student_agent.StudentAgent")
     def test_aria_chat_persists_and_returns_history(self, MockStudentAgent):
         instance = MockStudentAgent.return_value
         instance.chat.side_effect = ["Hi there!", "Sure, here's more info."]
-        instance.student_profile = {"student_id": "student_c"}
+        instance.student_profile = {"student_id": self.student_id}
 
         self.student.post("/api/chat/aria/", {"message": "Hello"}, format="json")
         self.student.post("/api/chat/aria/", {"message": "Tell me more"}, format="json")
@@ -150,7 +170,7 @@ class SubResourceHistoryTests(TestCase):
     def setUp(self):
         cache.clear()
         _reset_inprocess_agent_caches()
-        self.student = make_student_client(email="d@example.com", student_id="student_d")
+        self.student, self.student_id = make_student_client(email="d@example.com")
         self.student.post("/api/profile/", {"name": "Dave"}, format="json")
         self.officer_wsu = make_university_client(email="officer2@wsu.edu", university_id="wright_state_cs")
         self.officer_franklin = make_university_client(email="officer2@franklin.edu", university_id="franklin_cs")
@@ -165,13 +185,60 @@ class SubResourceHistoryTests(TestCase):
         self.student.post("/api/profile/resume/", {"file": file1}, format="multipart")
         self.student.post("/api/profile/resume/", {"file": file2}, format="multipart")
 
-        rows = ResumeUpload.objects.filter(student__student_id="student_d")
+        rows = ResumeUpload.objects.filter(student__student_id=self.student_id)
         self.assertEqual(rows.count(), 2)
         file_paths = {r.file_path for r in rows}
         self.assertEqual(len(file_paths), 2)  # distinct on-disk paths, no clobbering
 
-        resp = self.student.get("/api/profile/student_d/resumes/")
+        resp = self.student.get(f"/api/profile/{self.student_id}/resumes/")
         self.assertEqual(resp.data["count"], 2)
+
+    @mock.patch("agents.resume_parser.ResumeParserAgent")
+    def test_resume_download_scoped_to_owner_and_delete_removes_it(self, MockParser):
+        MockParser.return_value.parse.return_value = {"skills": ["Python"]}
+        file1 = SimpleUploadedFile("resume.pdf", b"resume-bytes", content_type="application/pdf")
+        self.student.post("/api/profile/resume/", {"file": file1}, format="multipart")
+        resume_id = ResumeUpload.objects.get(student__student_id=self.student_id).id
+
+        download_resp = self.student.get(f"/api/profile/resume/{resume_id}/")
+        self.assertEqual(download_resp.status_code, status.HTTP_200_OK)
+
+        other_student, _ = make_student_client(email="e@example.com")
+        forbidden_resp = other_student.get(f"/api/profile/resume/{resume_id}/")
+        self.assertEqual(forbidden_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        delete_resp = self.student.delete(f"/api/profile/resume/{resume_id}/")
+        self.assertEqual(delete_resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(ResumeUpload.objects.filter(id=resume_id).exists())
+
+    def test_resume_detail_404_for_missing_resume(self):
+        resp = self.student.get("/api/profile/resume/999999/")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    @mock.patch("agents.linkedin_agent.LinkedInAgent")
+    def test_linkedin_image_history_download_and_ownership(self, MockLinkedInAgent):
+        MockLinkedInAgent.return_value.extract.return_value = {"skills": ["Leadership"]}
+
+        image = SimpleUploadedFile("screenshot.png", b"fake-image-bytes", content_type="image/png")
+        upload_resp = self.student.post("/api/profile/linkedin/", {"images": image}, format="multipart")
+        self.assertEqual(upload_resp.status_code, status.HTTP_200_OK)
+        analysis_id = upload_resp.data["analysis_id"]
+        self.assertEqual(upload_resp.data["images"][0]["url"], f"/api/profile/linkedin/{analysis_id}/images/0/")
+
+        history_resp = self.student.get(f"/api/profile/{self.student_id}/linkedin-history/")
+        self.assertEqual(history_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(history_resp.data["analyses"][0]["id"], analysis_id)
+        self.assertEqual(len(history_resp.data["analyses"][0]["images"]), 1)
+
+        download_resp = self.student.get(f"/api/profile/linkedin/{analysis_id}/images/0/")
+        self.assertEqual(download_resp.status_code, status.HTTP_200_OK)
+
+        out_of_range_resp = self.student.get(f"/api/profile/linkedin/{analysis_id}/images/5/")
+        self.assertEqual(out_of_range_resp.status_code, status.HTTP_404_NOT_FOUND)
+
+        other_student, _ = make_student_client(email="f@example.com")
+        forbidden_resp = other_student.get(f"/api/profile/linkedin/{analysis_id}/images/0/")
+        self.assertEqual(forbidden_resp.status_code, status.HTTP_403_FORBIDDEN)
 
     @mock.patch("agents.university_agent.UniversityAgent")
     def test_fit_assessment_history_dual_mode_visibility(self, MockUniversityAgent):
@@ -181,15 +248,15 @@ class SubResourceHistoryTests(TestCase):
         self.student.post("/api/assessments/generate/wright_state_cs/")
         self.student.post("/api/assessments/generate/franklin_cs/")
 
-        student_view = self.student.get("/api/assessments/student_d/")
+        student_view = self.student.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(student_view.data["count"], 2)
 
-        wsu_view = self.officer_wsu.get("/api/assessments/student_d/")
+        wsu_view = self.officer_wsu.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(wsu_view.data["count"], 1)
         self.assertEqual(wsu_view.data["assessments"][0]["university_id"], "wright_state_cs")
 
-        franklin_view = self.officer_franklin.get("/api/assessments/student_d/")
+        franklin_view = self.officer_franklin.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(franklin_view.data["count"], 1)
         self.assertEqual(franklin_view.data["assessments"][0]["university_id"], "franklin_cs")
 
-        self.assertEqual(FitAssessment.objects.filter(student__student_id="student_d").count(), 2)
+        self.assertEqual(FitAssessment.objects.filter(student__student_id=self.student_id).count(), 2)

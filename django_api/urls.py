@@ -8,8 +8,14 @@ urlpatterns = [
     # APIs 1-5: Profile Management
     path("profile/", views.ProfileCreateUpdateAPIView.as_view(), name="profile-create-update"),
     path("profile/resume/", views.ResumeUploadAPIView.as_view(), name="profile-resume"),
+    path("profile/resume/<int:resume_id>/", views.ResumeDetailAPIView.as_view(), name="profile-resume-detail"),
     path("profile/github/", views.GitHubAnalyzeAPIView.as_view(), name="profile-github"),
     path("profile/linkedin/", views.LinkedInAnalyzeAPIView.as_view(), name="profile-linkedin"),
+    path(
+        "profile/linkedin/<int:analysis_id>/images/<int:index>/",
+        views.LinkedInImageDetailAPIView.as_view(),
+        name="profile-linkedin-image-detail",
+    ),
     path("profile/<str:student_id>/", views.ProfileDetailAPIView.as_view(), name="profile-detail"),
 
     # Persistent GET APIs for profile sub-resource history

@@ -12,7 +12,6 @@ from django_api.models import (
     StudentProfile,
 )
 
-
 BASE_DIR = Path(__file__).resolve().parents[1]
 UPLOADS_DIR = BASE_DIR / "uploads"
 
@@ -355,7 +354,7 @@ def analyze_linkedin(student_id: str, uploaded_images: List[Any]) -> Dict[str, A
     generate_summary(profile)
     save_profile_data(student_id, profile)
 
-    LinkedInAnalysis.objects.create(
+    analysis = LinkedInAnalysis.objects.create(
         student=StudentProfile.objects.get(student_id=student_id),
         image_paths=image_paths,
         extracted=extracted,
@@ -363,6 +362,7 @@ def analyze_linkedin(student_id: str, uploaded_images: List[Any]) -> Dict[str, A
 
     return {
         "student_id": student_id,
+        "analysis_id": analysis.id,
         "image_paths": image_paths,
         "extracted": extracted,
         "skills_added": skills_added,

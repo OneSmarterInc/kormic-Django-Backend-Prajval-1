@@ -1,5 +1,12 @@
 from rest_framework import serializers
 
+# Numeric fields left blank by a form submit as "" rather than omitted/null.
+# IntegerField/FloatField's allow_null only tolerates JSON null, not "", so
+# without this they 400 on every empty numeric field.
+NULLABLE_NUMERIC_FIELDS = {
+    "graduation_year", "gpa", "gre_quant", "gre_verbal", "toefl", "ielts", "budget",
+}
+
 
 class ProfileCreateUpdateSerializer(serializers.Serializer):
     student_id = serializers.CharField(required=False, allow_blank=True)
@@ -27,6 +34,13 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
     github = serializers.CharField(required=False, allow_blank=True)
     linkedin_url = serializers.CharField(required=False, allow_blank=True)
     notes = serializers.CharField(required=False, allow_blank=True)
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, "copy") else dict(data)
+        for field in NULLABLE_NUMERIC_FIELDS:
+            if data.get(field, None) == "":
+                data[field] = None
+        return super().to_internal_value(data)
 
 
 class ResumeUploadSerializer(serializers.Serializer):

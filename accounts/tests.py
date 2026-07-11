@@ -1,18 +1,24 @@
+from unittest import mock
+
 import pyotp
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
 from accounts.models import Account, TOTPDevice
+from django_api.services import make_student_id
+
+STUDENT_EMAIL = "student1@example.com"
+STUDENT_ID = make_student_id(STUDENT_EMAIL)
 
 
 def register(client, **overrides):
     payload = {
-        "email": "student1@example.com",
+        "email": STUDENT_EMAIL,
         "password": "S3curePassw0rd!",
         "role": "student",
-        "student_id": "student1",
         "name": "Student One",
     }
     payload.update(overrides)
@@ -31,7 +37,7 @@ def register_university(client, **overrides):
     return client.post("/api/auth/register/", payload, format="json")
 
 
-def login(client, email="student1@example.com", password="S3curePassw0rd!"):
+def login(client, email=STUDENT_EMAIL, password="S3curePassw0rd!"):
     return client.post("/api/auth/login/", {"email": email, "password": password}, format="json")
 
 
@@ -52,7 +58,13 @@ class AuthFlowTests(TestCase):
     def test_register_student_success(self):
         resp = register(self.client)
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(Account.objects.get(student_id="student1").role, "student")
+        self.assertEqual(Account.objects.get(student_id=STUDENT_ID).role, "student")
+
+    def test_register_student_ignores_client_supplied_student_id(self):
+        resp = register(self.client, student_id="someone-elses-id")
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(resp.data["user"]["student_id"], STUDENT_ID)
+        self.assertFalse(Account.objects.filter(student_id="someone-elses-id").exists())
 
     def test_register_university_valid_id_success(self):
         resp = register_university(self.client)
@@ -65,13 +77,15 @@ class AuthFlowTests(TestCase):
 
     def test_register_duplicate_email_rejected(self):
         register(self.client)
-        resp = register(self.client, student_id="student2")
+        resp = register(self.client)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_register_duplicate_student_id_rejected(self):
-        register(self.client)
-        resp = register(self.client, email="student2@example.com")
+        # Different emails that normalize (via make_student_id) to the same slug.
+        register(self.client, email="student.one@example.com")
+        resp = register(self.client, email="student+one@example.com")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("student_id", resp.data)
 
     def test_login_unenrolled_user_gets_restricted_token(self):
         register(self.client)
@@ -85,7 +99,7 @@ class AuthFlowTests(TestCase):
         register(self.client)
         access = login(self.client).data["access"]
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-        resp = self.client.get("/api/profile/student1/")
+        resp = self.client.get(f"/api/profile/{STUDENT_ID}/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_restricted_token_allows_enroll_and_verify_enrollment(self):
@@ -95,7 +109,7 @@ class AuthFlowTests(TestCase):
         self.assertEqual(enroll_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(verify_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(verify_resp.data["backup_codes"]), 10)
-        device = TOTPDevice.objects.get(user__account__student_id="student1")
+        device = TOTPDevice.objects.get(user__account__student_id=STUDENT_ID)
         self.assertIsNotNone(device.confirmed_at)
 
     def test_same_access_token_now_passes_totp_gate_after_enrollment(self):
@@ -104,7 +118,7 @@ class AuthFlowTests(TestCase):
         enroll_and_confirm(self.client, access)
         # Reuse the SAME pre-enrollment token, no re-login.
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-        resp = self.client.get("/api/profile/student1/")
+        resp = self.client.get(f"/api/profile/{STUDENT_ID}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)  # profile gate passes, just no profile yet
 
     def test_login_enrolled_user_gets_mfa_token_not_direct_tokens(self):
@@ -226,3 +240,49 @@ class AuthFlowTests(TestCase):
         enroll_and_confirm(self.client, access)
         resp2 = self.client.get("/api/auth/me/")
         self.assertTrue(resp2.data["totp_enrolled"])
+
+    def test_me_endpoint_reports_onboarding_status(self):
+        register(self.client)
+        access = login(self.client).data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        enroll_and_confirm(self.client, access)
+
+        resp = self.client.get("/api/auth/me/")
+        onboarding = resp.data["onboarding"]
+        self.assertFalse(onboarding["profile_exists"])
+        self.assertFalse(onboarding["resume_uploaded"])
+        self.assertFalse(onboarding["github_connected"])
+        self.assertFalse(onboarding["linkedin_connected"])
+        self.assertFalse(onboarding["setup_complete"])
+
+        self.client.post(
+            "/api/profile/",
+            {"github": "https://github.com/octocat", "linkedin_url": "https://linkedin.com/in/octocat"},
+            format="json",
+        )
+
+        resp2 = self.client.get("/api/auth/me/")
+        onboarding2 = resp2.data["onboarding"]
+        self.assertTrue(onboarding2["profile_exists"])
+        self.assertTrue(onboarding2["github_connected"])
+        self.assertTrue(onboarding2["linkedin_connected"])
+        self.assertFalse(onboarding2["resume_uploaded"])
+        self.assertFalse(onboarding2["setup_complete"])  # resume still missing
+
+    @mock.patch("agents.linkedin_agent.LinkedInAgent")
+    def test_onboarding_reports_linkedin_connected_after_image_upload(self, MockLinkedInAgent):
+        # LinkedIn is captured via image upload + parsing, not a typed URL --
+        # linkedin_connected must not depend on profile.linkedin_url alone.
+        MockLinkedInAgent.return_value.extract.return_value = {"skills": []}
+
+        register(self.client)
+        access = login(self.client).data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        enroll_and_confirm(self.client, access)
+
+        image = SimpleUploadedFile("screenshot.png", b"fake-image-bytes", content_type="image/png")
+        upload_resp = self.client.post("/api/profile/linkedin/", {"images": image}, format="multipart")
+        self.assertEqual(upload_resp.status_code, status.HTTP_200_OK)
+
+        resp = self.client.get("/api/auth/me/")
+        self.assertTrue(resp.data["onboarding"]["linkedin_connected"])
