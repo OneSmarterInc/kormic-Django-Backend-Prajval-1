@@ -1,4 +1,4 @@
-from ..knowledge.trust_layer import (
+from knowledge.trust_layer import (
     is_high_risk_question,
     calculate_confidence,
     build_trust_summary,

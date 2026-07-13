@@ -11,6 +11,7 @@ Purpose:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List
 
 
@@ -100,7 +101,7 @@ def is_high_risk_question(question: str) -> bool:
     - acceptance rates or salary outcomes
     """
     q = _normalize(question)
-    return any(keyword in q for keyword in HIGH_RISK_FACT_KEYWORDS)
+    return any(re.search(r"\b" + re.escape(keyword) + r"\b", q) for keyword in HIGH_RISK_FACT_KEYWORDS)
 
 
 def source_weight(source_type: str) -> float:
@@ -346,3 +347,4 @@ def should_create_pending_query(trust_summary: Dict) -> bool:
         return True
 
     return False
+
