@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import re
 from pathlib import Path
@@ -29,9 +28,12 @@ from django_api.models import (
     GitHubAnalysis,
     IntakeSession,
     LinkedInAnalysis,
+    PendingQuery,
     ResumeUpload,
     RoadmapVersion,
     StudentProfile,
+    UniversityQuestionLog,
+    VerifiedAnswer,
 )
 from django_api.serializers import (
     ProfileCreateUpdateSerializer,
@@ -39,15 +41,17 @@ from django_api.serializers import (
     GitHubAnalyzeSerializer,
 )
 from django_api.services import (
-    UPLOADS_DIR,
     create_or_update_profile,
+    delete_profile_image,
     get_profile,
+    get_profile_image_path,
     parse_resume,
     analyze_github,
     analyze_linkedin,
     load_profile_data,
     save_profile_data,
     make_student_id,
+    upload_profile_image,
 )
 
 STUDENT_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
@@ -72,15 +76,6 @@ def log_chat_turn(*, channel, student_id, university_id="", user_message="", ass
         meta=meta or {},
     )
 
-
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-
-DATA_DIR.mkdir(exist_ok=True)
-
-PENDING_QUERIES_FILE = DATA_DIR / "pending_queries.json"
-VERIFIED_KB_FILE = BASE_DIR / "knowledge" / "human_verified_answers.json"
-QUESTIONS_LOG_FILE = BASE_DIR / "knowledge" / "university_questions.json"
 
 # In-memory cache while Django server is running.
 ARIA_SESSIONS: Dict[str, Any] = {}
@@ -107,6 +102,9 @@ def api_home(request):
             "linkedin": "POST /api/profile/linkedin/",
             "linkedin_history": "GET /api/profile/<student_id>/linkedin-history/",
             "linkedin_image": "GET /api/profile/linkedin/<analysis_id>/images/<index>/",
+            "profile_image_upload": "POST /api/profile/image/",
+            "profile_image": "GET /api/profile/<student_id>/image/",
+            "profile_image_delete": "DELETE /api/profile/<student_id>/image/",
         },
         "chat_apis": {
             "profile_intake": "POST /api/chat/intake/",
@@ -140,33 +138,6 @@ def api_home(request):
 
 def api_error(message: str, http_status=status.HTTP_400_BAD_REQUEST):
     return Response({"status": "error", "message": str(message)}, status=http_status)
-
-
-def read_json_file(path, default):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not path.exists():
-        return default
-
-    try:
-        with open(path, "r", encoding="utf-8") as file:
-            data = json.load(file)
-        return data if data is not None else default
-    except Exception:
-        return default
-
-
-def get_pending_queries_list():
-    data = read_json_file(PENDING_QUERIES_FILE, [])
-
-    if isinstance(data, dict):
-        return data.get("pending_queries", [])
-
-    if isinstance(data, list):
-        return data
-
-    return []
 
 
 def load_intake_session(student_key: str) -> Optional[Dict[str, Any]]:
@@ -306,11 +277,88 @@ class ProfileDetailAPIView(APIView):
     def get(self, request, student_id):
         try:
             profile = get_profile(student_id)
+            profile["profile_image_url"] = (
+                request.build_absolute_uri(f"/api/profile/{student_id}/image/")
+                if get_profile_image_path(student_id)
+                else None
+            )
             return Response(profile, status=status.HTTP_200_OK)
         except FileNotFoundError as exc:
             return api_error(str(exc), status.HTTP_404_NOT_FOUND)
         except Exception as exc:
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProfileImageUploadAPIView(APIView):
+    """
+    POST /api/profile/image/
+    Upload/replace the authenticated student's profile picture. Unlike
+    resume/LinkedIn uploads, this is not a history -- each call replaces
+    the previous image.
+    """
+
+    permission_classes = STUDENT_PERMISSIONS
+
+    def post(self, request):
+        student_id = request.user.account.student_id
+        image = request.FILES.get("image")
+
+        if not image:
+            return api_error("An image file is required using key 'image'.")
+
+        if image.content_type and not image.content_type.startswith("image/"):
+            return api_error(f"Unsupported file type: {image.content_type}. Upload an image file.")
+
+        try:
+            upload_profile_image(student_id=student_id, uploaded_file=image)
+            return Response(
+                {
+                    "status": "success",
+                    "student_id": student_id,
+                    "profile_image_url": request.build_absolute_uri(f"/api/profile/{student_id}/image/"),
+                },
+                status=status.HTTP_200_OK,
+            )
+        except Exception as exc:
+            return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ProfileImageDetailAPIView(APIView):
+    """
+    GET /api/profile/<student_id>/image/ — download the current profile picture.
+    Readable by the owning student or any university officer (dashboard
+    rosters list every student's picture), matching UniversityProfilesListView.
+    DELETE /api/profile/<student_id>/image/ — remove it; owner-only.
+    """
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsStudentOrUniversityRole]
+
+    def get(self, request, student_id):
+        account = get_account(request)
+        if account.role == "student" and account.student_id != student_id:
+            return api_error("You may only access your own profile picture.", status.HTTP_403_FORBIDDEN)
+
+        image_path = get_profile_image_path(student_id)
+        if not image_path:
+            return api_error("No profile picture uploaded for this student.", status.HTTP_404_NOT_FOUND)
+
+        file_path = Path(image_path)
+        if not file_path.exists():
+            return api_error("Profile picture file is missing on the server.", status.HTTP_404_NOT_FOUND)
+
+        content = file_path.read_bytes()
+        return FileResponse(io.BytesIO(content), as_attachment=False, filename=file_path.name)
+
+    def delete(self, request, student_id):
+        account = get_account(request)
+        if account.role != "student" or account.student_id != student_id:
+            return api_error("You may only delete your own profile picture.", status.HTTP_403_FORBIDDEN)
+
+        removed = delete_profile_image(student_id)
+        if not removed:
+            return api_error("No profile picture uploaded for this student.", status.HTTP_404_NOT_FOUND)
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ResumeUploadAPIView(APIView):
@@ -341,7 +389,8 @@ class ResumeUploadAPIView(APIView):
                 {
                     "status": "success",
                     "student_id": result["student_id"],
-                    "file_path": result["file_path"],
+                    "resume_id": result["resume_id"],
+                    "resume_url": request.build_absolute_uri(f"/api/profile/resume/{result['resume_id']}/"),
                     "extracted_data": result["extracted_data"],
                     "profile": result["profile"],
                 },
@@ -436,27 +485,23 @@ class GitHubAnalyzeAPIView(APIView):
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def build_linkedin_images_payload(analysis_id: int, image_paths):
+def build_linkedin_images_payload(request, analysis_id: int, image_paths):
     """
     Turns the absolute on-disk paths stored on a LinkedInAnalysis row into a
-    frontend-usable shape: a path relative to the uploads/media root (no
-    server filesystem layout leaked) plus an authenticated download URL
+    frontend-usable shape: a full, directly-fetchable URL to the image
     (raw MEDIA_URL static serving isn't used here since these screenshots
     are private -- serving must stay behind the same JWT+ownership check as
-    the rest of the API).
+    the rest of the API, so the URL still requires an Authorization header
+    when fetched -- it just isn't a bare relative path anymore).
     """
     payload = []
 
     for index, path in enumerate(image_paths or []):
-        try:
-            media_path = Path(path).resolve().relative_to(UPLOADS_DIR.resolve()).as_posix()
-        except ValueError:
-            media_path = Path(path).name
+        relative_url = f"/api/profile/linkedin/{analysis_id}/images/{index}/"
 
         payload.append({
             "index": index,
-            "media_path": media_path,
-            "url": f"/api/profile/linkedin/{analysis_id}/images/{index}/",
+            "uploaded_image_url": request.build_absolute_uri(relative_url),
         })
 
     return payload
@@ -486,7 +531,7 @@ class LinkedInAnalyzeAPIView(APIView):
                     "status": "success",
                     "student_id": result["student_id"],
                     "analysis_id": result["analysis_id"],
-                    "images": build_linkedin_images_payload(result["analysis_id"], result["image_paths"]),
+                    "images": build_linkedin_images_payload(request, result["analysis_id"], result["image_paths"]),
                     "skills_added": result["skills_added"],
                     "extracted": result["extracted"],
                 },
@@ -663,9 +708,9 @@ def get_aria_agent(student_id: str):
         from agents.student_agent import StudentAgent
         profile = load_profile_data(student_id)
         try:
-            ARIA_SESSIONS[key] = StudentAgent(profile)
+            ARIA_SESSIONS[key] = StudentAgent(profile, student_id=key)
         except TypeError:
-            ARIA_SESSIONS[key] = StudentAgent(profile, student_name=profile.get("name"))
+            ARIA_SESSIONS[key] = StudentAgent(profile, student_name=profile.get("name"), student_id=key)
     return ARIA_SESSIONS[key]
 
 
@@ -934,8 +979,23 @@ def _assessment_failed(assessment: Any) -> bool:
 @permission_classes(STUDENT_PERMISSIONS)
 def generate_fit_assessment(request, university_id: str):
     student_id = request.user.account.student_id
+    force = str(request.query_params.get("force", "")).strip().lower() in ("1", "true", "yes")
 
     try:
+        student_key = make_student_id(student_id)
+
+        if not force:
+            cached = (
+                FitAssessment.objects.filter(student__student_id=student_key, university_id=university_id)
+                .order_by("-created_at")
+                .first()
+            )
+            if cached:
+                response_data = dict(cached.assessment)
+                response_data["cached"] = True
+                response_data["generated_at"] = cached.created_at
+                return Response(response_data, status=status.HTTP_200_OK)
+
         profile = load_profile_data(student_id)
         agent = get_university_agent(university_id)
         try:
@@ -950,13 +1010,17 @@ def generate_fit_assessment(request, university_id: str):
         profile["assessments"][university_id] = assessment
         save_profile_data(student_id, profile)
 
-        FitAssessment.objects.create(
-            student=StudentProfile.objects.get(student_id=student_id),
+        row = FitAssessment.objects.create(
+            student=StudentProfile.objects.get(student_id=student_key),
             university_id=university_id,
             assessment=assessment,
         )
 
-        return Response(assessment, status=status.HTTP_200_OK)
+        response_data = dict(assessment)
+        response_data["cached"] = False
+        response_data["generated_at"] = row.created_at
+
+        return Response(response_data, status=status.HTTP_200_OK)
     except ValueError as exc:
         return api_error(str(exc), status.HTTP_404_NOT_FOUND)
     except Exception as exc:
@@ -990,6 +1054,43 @@ class AssessmentHistoryView(APIView):
                 {"university_id": r.university_id, "assessment": r.assessment, "created_at": r.created_at}
                 for r in rows
             ],
+        })
+
+
+class AssessmentDetailView(APIView):
+    """
+    GET /api/assessments/<university_id>/<student_id>/
+    Returns only the latest fit assessment for one university+student pair,
+    without having to filter the full cross-university history client-side.
+    """
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsStudentOrUniversityRole]
+
+    def get(self, request, university_id, student_id):
+        account = get_account(request)
+
+        if account.role == "student" and account.student_id != student_id:
+            return api_error("You may only access your own assessment history.", status.HTTP_403_FORBIDDEN)
+        if account.role != "student" and account.university_id != university_id:
+            return api_error("You may only access your own university's assessment history.", status.HTTP_403_FORBIDDEN)
+
+        row = (
+            FitAssessment.objects.filter(student__student_id=student_id, university_id=university_id)
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not row:
+            return api_error(
+                f"No fit assessment found for student_id={student_id}, university_id={university_id}.",
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response({
+            "student_id": student_id,
+            "university_id": university_id,
+            "assessment": row.assessment,
+            "created_at": row.created_at,
         })
 
 
@@ -1088,7 +1189,7 @@ class ResumeHistoryView(APIView):
                 {
                     "id": r.id,
                     "original_filename": r.original_filename,
-                    "file_path": r.file_path,
+                    "resume_url": request.build_absolute_uri(f"/api/profile/resume/{r.id}/"),
                     "extracted_data": r.extracted_data,
                     "created_at": r.created_at,
                 }
@@ -1127,7 +1228,7 @@ class LinkedInHistoryView(APIView):
             "analyses": [
                 {
                     "id": r.id,
-                    "images": build_linkedin_images_payload(r.id, r.image_paths),
+                    "images": build_linkedin_images_payload(request, r.id, r.image_paths),
                     "extracted": r.extracted,
                     "created_at": r.created_at,
                 }
@@ -1145,31 +1246,27 @@ class PendingQueriesView(APIView):
 
     def get(self, request):
         own_university_id = request.user.account.university_id
-        queries = get_pending_queries_list()
-        pending_queries = []
+        rows = PendingQuery.objects.filter(university_id=own_university_id).exclude(
+            status=PendingQuery.Status.RESOLVED
+        )
 
-        for query in queries:
-            if query.get("university_id") != own_university_id:
-                continue
-
-            query_status = str(query.get("status", "pending")).lower()
-            if query_status in ["resolved", "answered", "closed"]:
-                continue
-
-            pending_queries.append({
-                "id": query.get("query_id") or query.get("id"),
-                "query_id": query.get("query_id") or query.get("id"),
-                "student_id": query.get("student_id"),
-                "student_name": query.get("student_name"),
-                "university_id": query.get("university_id"),
-                "agent_name": query.get("agent_name"),
-                "program": query.get("program"),
-                "question": query.get("question"),
-                "priority": query.get("priority", "normal"),
-                "urgency_reason": query.get("urgency_reason"),
-                "status": query.get("status", "pending"),
-                "timestamp": query.get("timestamp"),
-            })
+        pending_queries = [
+            {
+                "id": r.id,
+                "query_id": r.id,
+                "student_id": r.student_id,
+                "student_name": r.student_name,
+                "university_id": r.university_id,
+                "agent_name": r.agent_name,
+                "program": r.program,
+                "question": r.question,
+                "priority": r.priority,
+                "urgency_reason": r.urgency_reason,
+                "status": r.status,
+                "timestamp": r.created_at,
+            }
+            for r in rows
+        ]
 
         return Response({"pending_queries": pending_queries, "count": len(pending_queries)})
 
@@ -1196,13 +1293,7 @@ class AnswerPendingQueryView(APIView):
         except ValueError:
             return Response({"status": "failed", "message": "query_id must be a number"}, status=status.HTTP_400_BAD_REQUEST)
 
-        queries = get_pending_queries_list()
-        selected_query = None
-        for query in queries:
-            current_id = query.get("query_id") or query.get("id")
-            if str(current_id) == str(query_id_int):
-                selected_query = query
-                break
+        selected_query = PendingQuery.objects.filter(id=query_id_int).first()
 
         if not selected_query:
             return Response(
@@ -1210,14 +1301,13 @@ class AnswerPendingQueryView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        query_status = str(selected_query.get("status", "pending")).lower()
-        if query_status in ["resolved", "answered", "closed"]:
+        if selected_query.status == PendingQuery.Status.RESOLVED:
             return Response(
                 {"status": "failed", "message": f"Query {query_id_int} is already resolved."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        university_id = selected_query.get("university_id") or selected_query.get("agent_id") or selected_query.get("university")
+        university_id = selected_query.university_id
         if university_id and university_id != request.user.account.university_id:
             return Response(
                 {"status": "failed", "message": "You may only answer queries for your own university."},
@@ -1318,36 +1408,27 @@ def get_profile_presenter(university_id: str):
     return PROFILE_PRESENTERS[university_id]
 
 
-def normalize_query_record(query: Dict[str, Any]) -> Dict[str, Any]:
-    status_value = str(query.get("status", "pending")).lower()
-
-    if status_value in ["resolved", "answered"]:
-        query["status"] = "resolved"
-        query["priority"] = "normal"
-        query["display_status"] = "answered"
-
-        if not query.get("urgency_reason"):
-            query["urgency_reason"] = "Resolved query moved to Archive."
-
-        return query
-
-    priority = str(query.get("priority", "normal")).lower()
-
-    if priority not in ["urgent", "normal"]:
-        priority = "normal"
-
-    query["status"] = "pending"
-    query["priority"] = priority
-    query["display_status"] = "urgent" if priority == "urgent" else "pending"
-
-    if not query.get("urgency_reason"):
-        query["urgency_reason"] = (
-            "Urgency was classified at escalation time."
-            if priority == "urgent"
-            else "No clear time-sensitive risk detected."
-        )
-
-    return query
+def serialize_pending_query(query: "PendingQuery") -> Dict[str, Any]:
+    return {
+        "id": query.id,
+        "query_id": query.id,
+        "university_id": query.university_id,
+        "university": query.university_name,
+        "agent_name": query.agent_name,
+        "student_id": query.student_id,
+        "student_name": query.student_name,
+        "program": query.program,
+        "question": query.question,
+        "status": query.status,
+        "priority": query.priority,
+        "urgency_reason": query.urgency_reason,
+        "display_status": query.display_status,
+        "escalation_chain": query.escalation_chain,
+        "answer": query.answer,
+        "answered_by": query.answered_by,
+        "answered_at": query.answered_at,
+        "timestamp": query.created_at,
+    }
 
 
 class UniversityProfilesListView(APIView):
@@ -1369,6 +1450,11 @@ class UniversityProfilesListView(APIView):
             profiles.append({
                 "profile_id": data.get("student_id"),
                 "name": data.get("name"),
+                "profile_image_url": (
+                    request.build_absolute_uri(f"/api/profile/{row.student_id}/image/")
+                    if row.profile_image_path
+                    else None
+                ),
                 "institution": data.get("institution"),
                 "major": data.get("major"),
                 "gpa": data.get("gpa"),
@@ -1468,8 +1554,17 @@ class UniversityQuestionsView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        data = read_json_file(QUESTIONS_LOG_FILE, [])
-        questions = [q for q in data if q.get("university_id") == university_id] if isinstance(data, list) else []
+        rows = UniversityQuestionLog.objects.filter(university_id=university_id)
+        questions = [
+            {
+                "university_id": r.university_id,
+                "student_name": r.student_name,
+                "question": r.question,
+                "topic": r.topic,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
         return Response({"university_id": university_id, "questions": questions})
 
 
@@ -1479,12 +1574,8 @@ class UniversityQueriesView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        queries = get_pending_queries_list()
-        matched = [
-            normalize_query_record(dict(query))
-            for query in queries
-            if query.get("university_id") == university_id
-        ]
+        rows = PendingQuery.objects.filter(university_id=university_id)
+        matched = [serialize_pending_query(r) for r in rows]
         return Response({"university_id": university_id, "queries": matched})
 
 
@@ -1494,18 +1585,8 @@ class UniversityActiveQueriesView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        queries = get_pending_queries_list()
-        active = []
-
-        for query in queries:
-            if query.get("university_id") != university_id:
-                continue
-
-            query = normalize_query_record(dict(query))
-
-            if query.get("display_status") in ["urgent", "pending"]:
-                active.append(query)
-
+        rows = PendingQuery.objects.filter(university_id=university_id).exclude(status=PendingQuery.Status.RESOLVED)
+        active = [serialize_pending_query(r) for r in rows]
         return Response({"university_id": university_id, "queries": active})
 
 
@@ -1515,18 +1596,8 @@ class UniversityArchiveQueriesView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        queries = get_pending_queries_list()
-        archive = []
-
-        for query in queries:
-            if query.get("university_id") != university_id:
-                continue
-
-            query = normalize_query_record(dict(query))
-
-            if query.get("display_status") == "answered":
-                archive.append(query)
-
+        rows = PendingQuery.objects.filter(university_id=university_id, status=PendingQuery.Status.RESOLVED)
+        archive = [serialize_pending_query(r) for r in rows]
         return Response({"university_id": university_id, "queries": archive})
 
 
@@ -1536,11 +1607,21 @@ class VerifiedKnowledgeView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        records = read_json_file(VERIFIED_KB_FILE, [])
+        rows = VerifiedAnswer.objects.filter(university_id=university_id)
         matched = [
-            record for record in records
-            if record.get("university_id") == university_id
-        ] if isinstance(records, list) else []
+            {
+                "query_id": r.query_id,
+                "university_id": r.university_id,
+                "question": r.question,
+                "answer": r.answer,
+                "answered_by": r.answered_by,
+                "source": r.source,
+                "source_type": "human_verified",
+                "confidence": r.confidence,
+                "synced_at": r.created_at,
+            }
+            for r in rows
+        ]
 
         return Response({"university_id": university_id, "verified_answers": matched})
 
@@ -1561,14 +1642,7 @@ class EditPendingQueryView(APIView):
         if not answer:
             return Response({"status": "failed", "message": "answer is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        queries = get_pending_queries_list()
-        selected_query = None
-
-        for query in queries:
-            current_id = query.get("query_id") or query.get("id")
-            if str(current_id) == str(query_id):
-                selected_query = query
-                break
+        selected_query = PendingQuery.objects.filter(id=query_id).first()
 
         if not selected_query:
             return Response(
@@ -1576,11 +1650,7 @@ class EditPendingQueryView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        university_id = (
-            selected_query.get("university_id")
-            or selected_query.get("agent_id")
-            or selected_query.get("university")
-        )
+        university_id = selected_query.university_id
 
         if university_id and university_id != request.user.account.university_id:
             return Response(

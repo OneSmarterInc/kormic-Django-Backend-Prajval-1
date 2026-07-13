@@ -1,6 +1,7 @@
 # knowledge/university_kb.py
 # Knowledge base for university agents.
-# Runs in memory by default.
+# Persisted in the UniversityKnowledgeEntry DB table so learned/scraped facts
+# survive server restarts. In-memory list is kept as a fast search cache.
 # Every fact has a source type: 'seed', 'scraped', 'conversation', or 'human_verified'.
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ class KnowledgeEntry:
         self.learned_at = learned_at or datetime.now().isoformat()
         self.times_used = int(times_used or 0)
         self.search_score = 0.0
+        self.db_id: Optional[int] = None
 
     def _safe_confidence(self, value: Any) -> float:
         try:
@@ -154,6 +156,49 @@ class UniversityKnowledgeBase:
         self.university_id = university_id
         self.entries: List[KnowledgeEntry] = []
         self.total_questions_answered = 0
+        self._load_from_db()
+
+    # ------------------------------------------------------------------
+    # DB persistence
+    # ------------------------------------------------------------------
+
+    def _load_from_db(self) -> None:
+        from django_api.models import UniversityKnowledgeEntry
+
+        for row in UniversityKnowledgeEntry.objects.filter(university_id=self.university_id):
+            entry = KnowledgeEntry(
+                topic=row.topic,
+                content=row.content,
+                source_type=row.source_type,
+                source_url=row.source_url,
+                confidence=row.confidence,
+                learned_at=row.created_at.isoformat(),
+                times_used=row.times_used,
+            )
+            entry.db_id = row.id
+            self.entries.append(entry)
+
+    def _persist_entry(self, entry: KnowledgeEntry, create: bool = False) -> None:
+        from django_api.models import UniversityKnowledgeEntry
+
+        if create or not entry.db_id:
+            row = UniversityKnowledgeEntry.objects.create(
+                university_id=self.university_id,
+                topic=entry.topic,
+                content=entry.content,
+                source_type=entry.source_type,
+                source_url=entry.source_url,
+                confidence=entry.confidence,
+                times_used=entry.times_used,
+            )
+            entry.db_id = row.id
+        else:
+            UniversityKnowledgeEntry.objects.filter(id=entry.db_id).update(
+                source_type=entry.source_type,
+                source_url=entry.source_url,
+                confidence=entry.confidence,
+                times_used=entry.times_used,
+            )
 
     # ------------------------------------------------------------------
     # Storage
@@ -198,13 +243,18 @@ class UniversityKnowledgeBase:
             duplicate = self._find_duplicate(topic, content)
 
             if duplicate:
+                changed = False
                 try:
-                    duplicate.confidence = max(duplicate.confidence, float(confidence))
+                    new_confidence = max(duplicate.confidence, float(confidence))
+                    if new_confidence != duplicate.confidence:
+                        duplicate.confidence = new_confidence
+                        changed = True
                 except Exception:
                     pass
 
                 if source_url and not duplicate.source_url:
                     duplicate.source_url = source_url
+                    changed = True
 
                 # Prefer stronger source types.
                 old_priority = self.SOURCE_PRIORITY.get(duplicate.source_type, 0.5)
@@ -212,6 +262,10 @@ class UniversityKnowledgeBase:
 
                 if new_priority > old_priority:
                     duplicate.source_type = str(source_type or "unknown").lower()
+                    changed = True
+
+                if changed:
+                    self._persist_entry(duplicate)
 
                 return duplicate
 
@@ -224,6 +278,7 @@ class UniversityKnowledgeBase:
         )
 
         self.entries.append(entry)
+        self._persist_entry(entry, create=True)
         return entry
 
     def store_bulk(self, facts: List[Dict[str, Any]]) -> int:
@@ -329,7 +384,20 @@ class UniversityKnowledgeBase:
         for entry in results:
             entry.times_used += 1
 
+        self._persist_usage_bump(results)
+
         return results
+
+    def _persist_usage_bump(self, entries: List[KnowledgeEntry]) -> None:
+        ids = [entry.db_id for entry in entries if entry.db_id]
+
+        if not ids:
+            return
+
+        from django.db.models import F
+        from django_api.models import UniversityKnowledgeEntry
+
+        UniversityKnowledgeEntry.objects.filter(id__in=ids).update(times_used=F("times_used") + 1)
 
     # ------------------------------------------------------------------
     # Context / stats

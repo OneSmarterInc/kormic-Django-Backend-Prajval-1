@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from django_api.models import (
     GitHubAnalysis,
@@ -195,6 +195,55 @@ def get_profile(student_id: str) -> Dict[str, Any]:
     return load_profile_data(student_id)
 
 
+def get_profile_image_path(student_id: str) -> Optional[str]:
+    student_id = make_student_id(student_id)
+    profile = StudentProfile.objects.filter(student_id=student_id).first()
+
+    if profile is None or not profile.profile_image_path:
+        return None
+
+    return profile.profile_image_path
+
+
+def upload_profile_image(student_id: str, uploaded_file) -> Dict[str, Any]:
+    """
+    Save/replace the student's single current profile picture.
+
+    Unlike resumes or LinkedIn screenshots, a profile picture isn't a
+    history -- each upload replaces the previous one, and the old file is
+    removed from disk.
+    """
+    student_id = make_student_id(student_id)
+    profile, _ = StudentProfile.objects.get_or_create(student_id=student_id)
+
+    old_path = profile.profile_image_path
+    if old_path and Path(old_path).exists():
+        Path(old_path).unlink(missing_ok=True)
+
+    file_path = save_uploaded_file(student_id, uploaded_file, "profile_images")
+    profile.profile_image_path = str(file_path)
+    profile.save()
+
+    return {"student_id": student_id}
+
+
+def delete_profile_image(student_id: str) -> bool:
+    student_id = make_student_id(student_id)
+    profile = StudentProfile.objects.filter(student_id=student_id).first()
+
+    if profile is None or not profile.profile_image_path:
+        return False
+
+    old_path = Path(profile.profile_image_path)
+    if old_path.exists():
+        old_path.unlink(missing_ok=True)
+
+    profile.profile_image_path = ""
+    profile.save()
+
+    return True
+
+
 def save_uploaded_file(student_id: str, uploaded_file, folder_name: str) -> Path:
     student_id = make_student_id(student_id)
     target_dir = UPLOADS_DIR / folder_name / student_id
@@ -249,7 +298,7 @@ def parse_resume(student_id: str, uploaded_file) -> Dict[str, Any]:
     extracted_data = parser.parse(str(file_path))
     updated_profile = merge_resume_data_into_profile(student_id, extracted_data)
 
-    ResumeUpload.objects.create(
+    resume_row = ResumeUpload.objects.create(
         student=StudentProfile.objects.get(student_id=student_id),
         file_path=str(file_path),
         original_filename=uploaded_file.name,
@@ -258,7 +307,7 @@ def parse_resume(student_id: str, uploaded_file) -> Dict[str, Any]:
 
     return {
         "student_id": student_id,
-        "file_path": str(file_path),
+        "resume_id": resume_row.id,
         "extracted_data": extracted_data,
         "profile": updated_profile,
     }

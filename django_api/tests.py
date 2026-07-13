@@ -223,7 +223,11 @@ class SubResourceHistoryTests(TestCase):
         upload_resp = self.student.post("/api/profile/linkedin/", {"images": image}, format="multipart")
         self.assertEqual(upload_resp.status_code, status.HTTP_200_OK)
         analysis_id = upload_resp.data["analysis_id"]
-        self.assertEqual(upload_resp.data["images"][0]["url"], f"/api/profile/linkedin/{analysis_id}/images/0/")
+        self.assertTrue(
+            upload_resp.data["images"][0]["uploaded_image_url"].endswith(
+                f"/api/profile/linkedin/{analysis_id}/images/0/"
+            )
+        )
 
         history_resp = self.student.get(f"/api/profile/{self.student_id}/linkedin-history/")
         self.assertEqual(history_resp.status_code, status.HTTP_200_OK)
@@ -239,6 +243,53 @@ class SubResourceHistoryTests(TestCase):
         other_student, _ = make_student_client(email="f@example.com")
         forbidden_resp = other_student.get(f"/api/profile/linkedin/{analysis_id}/images/0/")
         self.assertEqual(forbidden_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_profile_image_upload_replace_download_delete_and_officer_visibility(self):
+        image1 = SimpleUploadedFile("avatar.png", b"first-image-bytes", content_type="image/png")
+        upload_resp = self.student.post("/api/profile/image/", {"image": image1}, format="multipart")
+        self.assertEqual(upload_resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(
+            upload_resp.data["profile_image_url"].endswith(f"/api/profile/{self.student_id}/image/")
+        )
+
+        first_path = StudentProfile.objects.get(student_id=self.student_id).profile_image_path
+        self.assertNotEqual(first_path, "")
+
+        download_resp = self.student.get(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(download_resp.status_code, status.HTTP_200_OK)
+
+        # Officers can view any student's picture (dashboard roster use case).
+        officer_resp = self.officer_wsu.get(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(officer_resp.status_code, status.HTTP_200_OK)
+
+        # Another student is forbidden.
+        other_student, _ = make_student_client(email="g@example.com")
+        forbidden_resp = other_student.get(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(forbidden_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Re-uploading replaces rather than accumulating, and removes the old file.
+        image2 = SimpleUploadedFile("avatar2.png", b"second-image-bytes", content_type="image/png")
+        self.student.post("/api/profile/image/", {"image": image2}, format="multipart")
+        second_path = StudentProfile.objects.get(student_id=self.student_id).profile_image_path
+        self.assertNotEqual(first_path, second_path)
+        from pathlib import Path
+        self.assertFalse(Path(first_path).exists())
+
+        # Officers cannot delete a student's picture -- owner only.
+        officer_delete_resp = self.officer_wsu.delete(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(officer_delete_resp.status_code, status.HTTP_403_FORBIDDEN)
+
+        delete_resp = self.student.delete(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(delete_resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(StudentProfile.objects.get(student_id=self.student_id).profile_image_path, "")
+
+        missing_resp = self.student.get(f"/api/profile/{self.student_id}/image/")
+        self.assertEqual(missing_resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_profile_image_upload_rejects_non_image_file(self):
+        not_an_image = SimpleUploadedFile("resume.pdf", b"pdf-bytes", content_type="application/pdf")
+        resp = self.student.post("/api/profile/image/", {"image": not_an_image}, format="multipart")
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
     @mock.patch("agents.university_agent.UniversityAgent")
     def test_fit_assessment_history_dual_mode_visibility(self, MockUniversityAgent):

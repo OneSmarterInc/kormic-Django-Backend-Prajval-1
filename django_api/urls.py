@@ -7,6 +7,7 @@ urlpatterns = [
 
     # APIs 1-5: Profile Management
     path("profile/", views.ProfileCreateUpdateAPIView.as_view(), name="profile-create-update"),
+    path("profile/image/", views.ProfileImageUploadAPIView.as_view(), name="profile-image-upload"),
     path("profile/resume/", views.ResumeUploadAPIView.as_view(), name="profile-resume"),
     path("profile/resume/<int:resume_id>/", views.ResumeDetailAPIView.as_view(), name="profile-resume-detail"),
     path("profile/github/", views.GitHubAnalyzeAPIView.as_view(), name="profile-github"),
@@ -17,6 +18,7 @@ urlpatterns = [
         name="profile-linkedin-image-detail",
     ),
     path("profile/<str:student_id>/", views.ProfileDetailAPIView.as_view(), name="profile-detail"),
+    path("profile/<str:student_id>/image/", views.ProfileImageDetailAPIView.as_view(), name="profile-image-detail"),
 
     # Persistent GET APIs for profile sub-resource history
     path("profile/<str:student_id>/resumes/", views.ResumeHistoryView.as_view(), name="profile-resume-history"),
@@ -33,6 +35,11 @@ urlpatterns = [
     # API 9: Fit Assessment
     path("assessments/generate/<str:university_id>/", views.generate_fit_assessment, name="generate-fit-assessment"),
     path("assessments/<str:student_id>/", views.AssessmentHistoryView.as_view(), name="assessment-history"),
+    path(
+        "assessments/<str:university_id>/<str:student_id>/",
+        views.AssessmentDetailView.as_view(),
+        name="assessment-detail",
+    ),
 
     # APIs 10-13: Roadmap, Queries, Export
     path("roadmap/<str:student_id>/", views.RoadmapView.as_view(), name="roadmap"),

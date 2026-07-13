@@ -56,14 +56,17 @@ class StudentAgent:
     - Export a clean student advising report.
     """
 
-    PROFILE_DIR = "profiles"
-    MEMORY_DIR = "memory"
-    LOG_DIR = "logs"
     REPORT_DIR = "reports"
 
     VALID_RESPONSE_MODES = {"short", "detailed", "summary"}
 
-    def __init__(self, student_profile: dict, profile=None, student_name: Optional[str] = None):
+    def __init__(
+        self,
+        student_profile: dict,
+        profile=None,
+        student_name: Optional[str] = None,
+        student_id: Optional[str] = None,
+    ):
         """Create Aria.
 
         Args:
@@ -71,6 +74,9 @@ class StudentAgent:
             profile: Optional StudentProfile object that persists insights,
                 university assessments, and summary to disk.
             student_name: Optional explicit name fallback.
+            student_id: Canonical student_id (as used by StudentProfile/ChatMessage)
+                used to key Aria's persistent DB memory. Falls back to a
+                name-derived key when not supplied.
         """
         self.profile = profile
         self.roadmap_planner = (
@@ -90,6 +96,7 @@ class StudentAgent:
 
         self.student_name = self.student_profile.get("name", "there")
         self.student_key = self._safe_name(self.student_name)
+        self.canonical_student_id = student_id or self.student_key
 
         self.conversation_history = []
         self.messages_exchanged = 0
@@ -97,11 +104,6 @@ class StudentAgent:
 
         if self.response_mode not in self.VALID_RESPONSE_MODES:
             self.response_mode = "detailed"
-
-        self.memory_file = os.path.join(
-            self.MEMORY_DIR,
-            f"{self.student_key}_memory.json"
-        )
 
         self.memory: Dict[str, Any] = {}
         self.load_memory()
@@ -141,13 +143,7 @@ class StudentAgent:
             return default
 
     def _ensure_dirs(self):
-        for folder in [
-            self.PROFILE_DIR,
-            self.MEMORY_DIR,
-            self.LOG_DIR,
-            self.REPORT_DIR,
-        ]:
-            os.makedirs(folder, exist_ok=True)
+        os.makedirs(self.REPORT_DIR, exist_ok=True)
 
     # ------------------------------------------------------------------
     # Student profile persistence
@@ -155,10 +151,11 @@ class StudentAgent:
     def save_student_profile(self) -> str:
         """Save through StudentProfile when available.
 
-        This prevents duplicate files like Priya.json and priya_profile.json.
-        The StudentProfile canonical JSON remains the single source of truth.
+        Under the Django API, the caller (django_api.views.aria_chat) persists
+        self.student_profile to the StudentProfile DB row via
+        services.save_profile_data() right after chat() returns, so there is
+        nothing to do here in that case.
         """
-        self._ensure_dirs()
         self.student_profile["response_mode"] = self.response_mode
 
         if self.profile is not None and hasattr(self.profile, "data"):
@@ -166,58 +163,36 @@ class StudentAgent:
             saved_path = self.profile.save()
             return str(saved_path)
 
-        filename = os.path.join(
-            self.PROFILE_DIR,
-            f"{self.student_key}.json"
-        )
-
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(self.student_profile, f, indent=4, ensure_ascii=False)
-
-        return filename
+        return f"db://student_profiles/{self.canonical_student_id}"
 
     # ------------------------------------------------------------------
     # Persistent memory
     # ------------------------------------------------------------------
     def load_memory(self):
-        self._ensure_dirs()
+        from django_api.models import AriaMemory
 
-        default_memory = {
+        record, _ = AriaMemory.objects.get_or_create(student_id=self.canonical_student_id)
+
+        self.memory = {
             "student": self.student_name,
-            "important_points": [],
-            "universities_discussed": [],
-            "github_profiles_analyzed": [],
-            "last_updated": None,
+            "important_points": list(record.important_points or []),
+            "universities_discussed": list(record.universities_discussed or []),
+            "github_profiles_analyzed": list(record.github_profiles_analyzed or []),
+            "last_updated": record.updated_at.strftime("%Y-%m-%d %H:%M:%S") if record.updated_at else None,
         }
 
-        if not os.path.exists(self.memory_file):
-            self.memory = default_memory
-            self.save_memory()
-            return
-
-        try:
-            with open(self.memory_file, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
-
-            self.memory = {**default_memory, **loaded}
-            self.memory.setdefault("important_points", [])
-            self.memory.setdefault("universities_discussed", [])
-            self.memory.setdefault("github_profiles_analyzed", [])
-            self.memory.setdefault("last_updated", None)
-
-        except Exception as exc:
-            console.print(
-                f"[yellow]Could not load memory file. Starting fresh: {exc}[/yellow]"
-            )
-            self.memory = default_memory
-            self.save_memory()
-
     def save_memory(self):
-        self._ensure_dirs()
-        self.memory["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        from django_api.models import AriaMemory
 
-        with open(self.memory_file, "w", encoding="utf-8") as f:
-            json.dump(self.memory, f, indent=4, ensure_ascii=False)
+        AriaMemory.objects.update_or_create(
+            student_id=self.canonical_student_id,
+            defaults={
+                "important_points": self.memory.get("important_points", [])[-50:],
+                "universities_discussed": self.memory.get("universities_discussed", []),
+                "github_profiles_analyzed": self.memory.get("github_profiles_analyzed", []),
+            },
+        )
+        self.memory["last_updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def update_memory(self, user_message: str, aria_response: str):
         text = user_message.lower()
@@ -259,21 +234,6 @@ class StudentAgent:
                 self.memory["universities_discussed"].append(canonical_name)
 
         self.save_memory()
-
-    # ------------------------------------------------------------------
-    # Logging
-    # ------------------------------------------------------------------
-    def log_conversation(self, user_message: str, aria_response: str):
-        self._ensure_dirs()
-
-        log_path = os.path.join(self.LOG_DIR, "aria_conversation_log.txt")
-
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write("\n" + "=" * 80 + "\n")
-            f.write(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Student: {self.student_name}\n")
-            f.write(f"User: {user_message}\n\n")
-            f.write(f"Aria: {aria_response}\n")
 
     # ------------------------------------------------------------------
     # Prompt building
@@ -1177,7 +1137,6 @@ Important style rules:
             "content": aria_response
         })
 
-        self.log_conversation(user_message, aria_response)
         self.update_memory(user_message, aria_response)
         self.save_student_profile()
 

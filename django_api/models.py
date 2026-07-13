@@ -43,6 +43,8 @@ class StudentProfile(models.Model):
     linkedin_url = models.CharField(max_length=500, blank=True, default="")
     linkedin_profile = models.JSONField(default=dict, blank=True)
 
+    profile_image_path = models.CharField(max_length=1000, blank=True, default="")
+
     notes = models.TextField(blank=True, default="")
     source = models.CharField(max_length=100, blank=True, default="api")
     verified = models.BooleanField(default=False)
@@ -219,3 +221,149 @@ class RoadmapVersion(models.Model):
 
     def __str__(self) -> str:
         return f"RoadmapVersion({self.student.student_id})"
+
+
+class AriaMemory(models.Model):
+    """
+    Persistent Aria long-term memory per student, replacing the previous
+    memory/<student_key>_memory.json file store.
+    """
+
+    student_id = models.CharField(max_length=255, unique=True, db_index=True)
+    important_points = models.JSONField(default=list, blank=True)
+    universities_discussed = models.JSONField(default=list, blank=True)
+    github_profiles_analyzed = models.JSONField(default=list, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"AriaMemory({self.student_id})"
+
+
+class UniversityKnowledgeEntry(models.Model):
+    """
+    Persistent knowledge-base fact for a university agent, replacing the
+    previous in-memory-only UniversityKnowledgeBase that was rebuilt from
+    seed data (and lost any scraped/learned facts) on every server restart.
+    """
+
+    university_id = models.CharField(max_length=255, db_index=True)
+    topic = models.CharField(max_length=500)
+    content = models.TextField()
+    source_type = models.CharField(max_length=50, default="unknown")
+    source_url = models.CharField(max_length=1000, blank=True, null=True)
+    confidence = models.FloatField(default=1.0)
+    times_used = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-confidence", "-times_used"]
+
+    def __str__(self) -> str:
+        return f"UniversityKnowledgeEntry({self.university_id}, {self.topic[:40]})"
+
+
+class PendingQuery(models.Model):
+    """
+    Escalated student question awaiting human/university verification,
+    replacing the previous data/pending_queries.json file store.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RESOLVED = "resolved", "Resolved"
+
+    class Priority(models.TextChoices):
+        NORMAL = "normal", "Normal"
+        URGENT = "urgent", "Urgent"
+
+    university_id = models.CharField(max_length=255, db_index=True)
+    university_name = models.CharField(max_length=255, blank=True, default="")
+    agent_name = models.CharField(max_length=255, blank=True, default="")
+    student_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    student_name = models.CharField(max_length=255, blank=True, default="")
+    program = models.CharField(max_length=255, blank=True, default="")
+    question = models.TextField()
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
+    priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.NORMAL)
+    urgency_reason = models.TextField(blank=True, default="")
+    escalation_chain = models.JSONField(default=list, blank=True)
+    answer = models.TextField(blank=True, default="")
+    answered_by = models.CharField(max_length=255, blank=True, default="")
+    answered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    @property
+    def display_status(self) -> str:
+        if self.status == self.Status.RESOLVED:
+            return "answered"
+        return "urgent" if self.priority == self.Priority.URGENT else "pending"
+
+    def __str__(self) -> str:
+        return f"PendingQuery(#{self.id}, {self.university_id}, {self.status})"
+
+
+class VerifiedAnswer(models.Model):
+    """
+    Durable human-verified answer for a university agent, replacing the
+    previous knowledge/human_verified_answers.json file store.
+    """
+
+    query = models.ForeignKey(
+        PendingQuery, on_delete=models.SET_NULL, null=True, blank=True, related_name="verified_answers"
+    )
+    university_id = models.CharField(max_length=255, db_index=True)
+    question = models.TextField()
+    answer = models.TextField()
+    answered_by = models.CharField(max_length=255, blank=True, default="")
+    source = models.CharField(max_length=100, blank=True, default="")
+    confidence = models.FloatField(default=1.0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"VerifiedAnswer({self.university_id}, {self.question[:40]})"
+
+
+class UniversityQuestionLog(models.Model):
+    """
+    Officer-facing question log for the profile presenter chat, replacing
+    the previous knowledge/university_questions.json file store.
+    """
+
+    university_id = models.CharField(max_length=255, db_index=True)
+    student_name = models.CharField(max_length=255, blank=True, default="")
+    question = models.TextField()
+    topic = models.CharField(max_length=100, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"UniversityQuestionLog({self.university_id}, {self.topic})"
+
+
+class PresenterAuditLog(models.Model):
+    """
+    Error/audit trail for ProfilePresenterAgent, replacing the previous
+    knowledge/profile_presenter_audit.json file store.
+    """
+
+    university_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    event = models.CharField(max_length=100)
+    message = models.TextField(blank=True, default="")
+    details = models.TextField(blank=True, default="")
+    profile_name = models.CharField(max_length=255, blank=True, default="")
+    question = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"PresenterAuditLog({self.event}, {self.created_at})"

@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import anthropic
@@ -50,8 +48,6 @@ class UniversityAgent:
     5. Stores reliable conversation learning back into the KB.
     """
 
-    PENDING_FILE = Path("data/pending_queries.json")
-    VERIFIED_KB_FILE = Path("knowledge/human_verified_answers.json")
     MIN_CONFIDENCE = 0.6
 
     def __init__(self, university_id: str, auto_scrape: bool = True):
@@ -117,34 +113,8 @@ class UniversityAgent:
             console.print(f"[dim]{exc}[/dim]")
 
     # --------------------------------------------------
-    # Safe JSON helpers
+    # Model JSON helpers
     # --------------------------------------------------
-
-    def _read_json_file(self, path: Path, default: Any) -> Any:
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        if not path.exists():
-            self._write_json_file(path, default)
-            return default
-
-        try:
-            with open(path, "r", encoding="utf-8") as file:
-                return json.load(file)
-        except json.JSONDecodeError as exc:
-            console.print(f"[red]Invalid JSON in {path}: {exc}[/red]")
-            return default
-        except UnicodeDecodeError as exc:
-            console.print(f"[red]UTF-8 decode error in {path}: {exc}[/red]")
-            return default
-        except Exception as exc:
-            console.print(f"[yellow]Could not read {path}: {exc}[/yellow]")
-            return default
-
-    def _write_json_file(self, path: Path, data: Any) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(path, "w", encoding="utf-8") as file:
-            json.dump(data, file, indent=4, ensure_ascii=False)
 
     def _clean_model_json(self, raw: str) -> str:
         text = str(raw or "").strip()
@@ -193,38 +163,30 @@ class UniversityAgent:
 
         This is what lets the agent learn from human corrections.
         """
-        records = self._read_json_file(self.VERIFIED_KB_FILE, [])
-
-        if not isinstance(records, list):
-            return None
+        from django_api.models import VerifiedAnswer
 
         question_norm = self._normalize_text(question)
         best_record = None
         best_score = 0.0
 
-        for record in records:
-            if record.get("university_id") != self.university_id:
-                continue
-
-            if record.get("source_type") != "human_verified":
-                continue
-
-            saved_question = record.get("question", "")
-            saved_answer = record.get("answer", "")
+        for record in VerifiedAnswer.objects.filter(university_id=self.university_id):
+            saved_question = record.question or ""
+            saved_answer = record.answer or ""
 
             if not saved_question or not saved_answer:
                 continue
 
             saved_norm = self._normalize_text(saved_question)
+            result = {"answer": saved_answer, "query_id": record.query_id}
 
             if question_norm == saved_norm:
-                return record
+                return result
 
             score = self._token_overlap_score(question, saved_question)
 
             if score > best_score:
                 best_score = score
-                best_record = record
+                best_record = result
 
         if best_score >= 0.75:
             return best_record
@@ -348,16 +310,26 @@ If a human-verified answer exists, use it directly.
     # Pending queries
     # --------------------------------------------------
 
-    def _load_pending_queries(self) -> List[Dict[str, Any]]:
-        data = self._read_json_file(self.PENDING_FILE, [])
-
-        if not isinstance(data, list):
-            return []
-
-        return data
-
-    def _save_pending_queries(self, queries: List[Dict[str, Any]]) -> None:
-        self._write_json_file(self.PENDING_FILE, queries)
+    def _serialize_pending_query(self, query) -> Dict[str, Any]:
+        return {
+            "query_id": query.id,
+            "university_id": query.university_id,
+            "university": query.university_name,
+            "agent_name": query.agent_name,
+            "student_id": query.student_id,
+            "student_name": query.student_name,
+            "program": query.program,
+            "question": query.question,
+            "timestamp": query.created_at.isoformat(),
+            "status": query.status,
+            "priority": query.priority,
+            "urgency_reason": query.urgency_reason,
+            "display_status": query.display_status,
+            "escalation_chain": query.escalation_chain,
+            "answer": query.answer,
+            "answered_by": query.answered_by,
+            "answered_at": query.answered_at.isoformat() if query.answered_at else None,
+        }
 
     def _classify_query_urgency(
         self,
@@ -466,18 +438,17 @@ STUDENT CONTEXT:
         return "pending"
 
     def _find_existing_active_query(self, question: str) -> Optional[Dict[str, Any]]:
-        queries = self._load_pending_queries()
+        from django_api.models import PendingQuery
+
         question_norm = self._normalize_text(question)
 
-        for query in queries:
-            if query.get("university_id") != self.university_id:
-                continue
+        active_queries = PendingQuery.objects.filter(university_id=self.university_id).exclude(
+            status=PendingQuery.Status.RESOLVED
+        )
 
-            if self._normalize_text(query.get("question", "")) != question_norm:
-                continue
-
-            if str(query.get("status", "")).lower() not in ["resolved", "answered"]:
-                return query
+        for query in active_queries:
+            if self._normalize_text(query.question) == question_norm:
+                return self._serialize_pending_query(query)
 
         return None
 
@@ -492,14 +463,7 @@ STUDENT CONTEXT:
         if existing_query:
             return existing_query
 
-        queries = self._load_pending_queries()
-
-        existing_ids = [
-            query.get("query_id", 0)
-            for query in queries
-            if isinstance(query.get("query_id", 0), int)
-        ]
-        query_id = max(existing_ids, default=0) + 1
+        from django_api.models import PendingQuery
 
         student_context = student_context or {}
 
@@ -523,45 +487,42 @@ STUDENT CONTEXT:
             "No urgency reason available.",
         )
 
-        query = {
-            "query_id": query_id,
-            "university_id": self.university_id,
-            "university": self.persona["name"],
-            "agent_name": self.persona["agent_name"],
-            "student_name": student_context.get("name", "Unknown"),
-            "program": program,
-            "question": question,
-            "timestamp": datetime.now().isoformat(),
-            "status": "pending",
-            "priority": priority,
-            "urgency_reason": urgency_reason,
-            "display_status": "urgent" if priority == "urgent" else "pending",
-            "escalation_chain": [
-                {"step": "Student asked Aria", "resolved": True},
-                {
-                    "step": f"Aria asked {self.persona['agent_name']}",
-                    "resolved": True,
-                },
-                {"step": failure_reason, "resolved": False},
-                {
-                    "step": f"Urgency classified as {priority}: {urgency_reason}",
-                    "resolved": True,
-                },
-            ],
-        }
+        escalation_chain = [
+            {"step": "Student asked Aria", "resolved": True},
+            {
+                "step": f"Aria asked {self.persona['agent_name']}",
+                "resolved": True,
+            },
+            {"step": failure_reason, "resolved": False},
+            {
+                "step": f"Urgency classified as {priority}: {urgency_reason}",
+                "resolved": True,
+            },
+        ]
 
-        queries.append(query)
-        self._save_pending_queries(queries)
+        query = PendingQuery.objects.create(
+            university_id=self.university_id,
+            university_name=self.persona["name"],
+            agent_name=self.persona["agent_name"],
+            student_id=student_context.get("student_id", ""),
+            student_name=student_context.get("name", "Unknown"),
+            program=program,
+            question=question,
+            priority=priority,
+            urgency_reason=urgency_reason,
+            escalation_chain=escalation_chain,
+        )
 
-        return query
+        return self._serialize_pending_query(query)
 
     def show_pending_queries(self) -> None:
-        queries = self._load_pending_queries()
+        from django_api.models import PendingQuery
 
         active_queries = [
-            query
-            for query in queries
-            if str(query.get("status", "")).lower() not in ["resolved", "answered"]
+            self._serialize_pending_query(query)
+            for query in PendingQuery.objects.filter(university_id=self.university_id).exclude(
+                status=PendingQuery.Status.RESOLVED
+            )
         ]
 
         if not active_queries:
@@ -613,74 +574,43 @@ STUDENT CONTEXT:
         answer: str,
         answered_by: str = "University contact",
     ) -> bool:
-        queries = self._load_pending_queries()
-        found = False
+        from django.utils import timezone
+        from django_api.models import PendingQuery, VerifiedAnswer
 
-        for query in queries:
-            if query.get("query_id") == query_id:
-                query["status"] = "resolved"
-                query["priority"] = "normal"
-                query["display_status"] = "answered"
-                query["answer"] = answer
-                query["answered_by"] = answered_by
-                query["answered_at"] = datetime.now().isoformat()
-
-                self.kb.store(
-                    topic=query.get("question", f"Pending query {query_id}"),
-                    content=answer,
-                    source_type="human_verified",
-                    confidence=1.0,
-                )
-
-                self._append_human_verified_file(
-                    query_id=query_id,
-                    university_id=query.get("university_id", self.university_id),
-                    question=query.get("question", f"Pending query {query_id}"),
-                    answer=answer,
-                    answered_by=answered_by,
-                    source="resolve_pending_query",
-                )
-
-                found = True
-                break
-
-        if not found:
+        try:
+            query = PendingQuery.objects.get(id=query_id)
+        except PendingQuery.DoesNotExist:
             print(f"Query ID {query_id} not found.")
             return False
 
-        self._save_pending_queries(queries)
-        print(f"Pending Query #{query_id} resolved successfully and saved as human-verified knowledge.")
-        return True
+        question_text = query.question or f"Pending query {query_id}"
 
-    def _append_human_verified_file(
-        self,
-        query_id: int,
-        university_id: str,
-        question: str,
-        answer: str,
-        answered_by: str,
-        source: str,
-    ) -> None:
-        records = self._read_json_file(self.VERIFIED_KB_FILE, [])
+        query.status = PendingQuery.Status.RESOLVED
+        query.priority = PendingQuery.Priority.NORMAL
+        query.answer = answer
+        query.answered_by = answered_by
+        query.answered_at = timezone.now()
+        query.save()
 
-        if not isinstance(records, list):
-            records = []
-
-        records.append(
-            {
-                "query_id": query_id,
-                "university_id": university_id,
-                "question": question,
-                "answer": answer,
-                "answered_by": answered_by,
-                "source": source,
-                "source_type": "human_verified",
-                "confidence": 1.0,
-                "synced_at": datetime.now().isoformat(),
-            }
+        self.kb.store(
+            topic=question_text,
+            content=answer,
+            source_type="human_verified",
+            confidence=1.0,
         )
 
-        self._write_json_file(self.VERIFIED_KB_FILE, records)
+        VerifiedAnswer.objects.create(
+            query=query,
+            university_id=query.university_id or self.university_id,
+            question=question_text,
+            answer=answer,
+            answered_by=answered_by,
+            source="resolve_pending_query",
+            confidence=1.0,
+        )
+
+        print(f"Pending Query #{query_id} resolved successfully and saved as human-verified knowledge.")
+        return True
 
     # --------------------------------------------------
     # Answering

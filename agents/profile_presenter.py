@@ -1,9 +1,6 @@
 # agents/profile_presenter.py
 
-import json
 import os
-from datetime import datetime
-from pathlib import Path
 from typing import Dict, List, Optional, Any
 
 import anthropic
@@ -19,10 +16,6 @@ if not api_key:
 client = anthropic.Anthropic(api_key=api_key)
 
 MODEL = os.getenv("PROFILE_PRESENTER_MODEL", "claude-3-5-haiku-latest")
-
-KNOWLEDGE_DIR = Path("knowledge")
-QUESTION_LOG_FILE = KNOWLEDGE_DIR / "university_questions.json"
-AUDIT_LOG_FILE = KNOWLEDGE_DIR / "profile_presenter_audit.json"
 
 
 PROFILE_PRESENTER_CONSTITUTION = """
@@ -44,53 +37,6 @@ Rules:
 class ProfilePresenterAgent:
     def __init__(self, university_id: str):
         self.university_id = university_id
-        KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-
-    def _safe_read_json(self, file_path: Path, default):
-        if not file_path.exists():
-            return default
-
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-
-        except json.JSONDecodeError as e:
-            self._audit_failure(
-                event="json_decode_error",
-                message=f"Invalid JSON in {file_path}",
-                details=str(e),
-            )
-            return default
-
-        except UnicodeDecodeError as e:
-            self._audit_failure(
-                event="unicode_decode_error",
-                message=f"UTF-8 decoding failed for {file_path}",
-                details=str(e),
-            )
-            return default
-
-        except Exception as e:
-            self._audit_failure(
-                event="json_read_error",
-                message=f"Failed to read {file_path}",
-                details=str(e),
-            )
-            return default
-
-    def _safe_write_json(self, file_path: Path, data):
-        try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-
-        except Exception as e:
-            self._audit_failure(
-                event="json_write_error",
-                message=f"Failed to write {file_path}",
-                details=str(e),
-            )
 
     def _audit_failure(
         self,
@@ -100,21 +46,17 @@ class ProfilePresenterAgent:
         profile_name: Optional[str] = None,
         question: Optional[str] = None,
     ):
-        audit_data = self._safe_read_json(AUDIT_LOG_FILE, [])
-
-        audit_data.append({
-            "event": event,
-            "message": message,
-            "details": details,
-            "university_id": self.university_id,
-            "profile_name": profile_name,
-            "question": question,
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        from django_api.models import PresenterAuditLog
 
         try:
-            with open(AUDIT_LOG_FILE, "w", encoding="utf-8") as f:
-                json.dump(audit_data, f, indent=4, ensure_ascii=False)
+            PresenterAuditLog.objects.create(
+                university_id=self.university_id,
+                event=event,
+                message=message,
+                details=details or "",
+                profile_name=profile_name or "",
+                question=question or "",
+            )
         except Exception:
             print(f"[AUDIT FAILURE] {event}: {message} | {details}")
 
@@ -138,17 +80,14 @@ class ProfilePresenterAgent:
         return "general"
 
     def _log_question(self, question: str, profile: Dict[str, Any]):
-        data = self._safe_read_json(QUESTION_LOG_FILE, [])
+        from django_api.models import UniversityQuestionLog
 
-        data.append({
-            "university_id": self.university_id,
-            "student_name": profile.get("name", "Unknown"),
-            "question": question,
-            "topic": self._detect_topic(question),
-            "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        self._safe_write_json(QUESTION_LOG_FILE, data)
+        UniversityQuestionLog.objects.create(
+            university_id=self.university_id,
+            student_name=profile.get("name", "Unknown"),
+            question=question,
+            topic=self._detect_topic(question),
+        )
 
     def _missing_fields(self, profile: Dict[str, Any]) -> List[str]:
         important_fields = [
