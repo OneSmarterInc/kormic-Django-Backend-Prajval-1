@@ -47,8 +47,11 @@ class GitHubSkillsAgent:
     evidence alongside self-reported resume/profile information.
     """
 
-    def __init__(self):
-        token = os.getenv("GITHUB_TOKEN")
+    def __init__(self, token: Optional[str] = None):
+        # Prefer a caller-supplied token (e.g. a student's own connected
+        # GitHub OAuth token) so their scans count against their personal
+        # rate limit; fall back to the shared server-side token otherwise.
+        token = token or os.getenv("GITHUB_TOKEN")
 
         self.headers = {
             "Accept": "application/vnd.github.v3+json",

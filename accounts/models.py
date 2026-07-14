@@ -52,3 +52,29 @@ class TOTPBackupCode(models.Model):
 
     def __str__(self) -> str:
         return f"TOTPBackupCode(user={self.user_id}, used={bool(self.used_at)})"
+
+
+class GitHubOAuthConnection(models.Model):
+    """
+    A student's own GitHub OAuth grant, so GitHub API calls made on their
+    behalf count against their personal rate limit instead of one shared
+    server-wide GITHUB_TOKEN. Tokens are encrypted at rest (accounts.crypto)
+    since, unlike the TOTP secret, a leaked GitHub token is a live,
+    externally-usable credential.
+    """
+
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="github_oauth_connection")
+
+    github_user_id = models.BigIntegerField()
+    github_username = models.CharField(max_length=255)
+
+    access_token_encrypted = models.TextField()
+    refresh_token_encrypted = models.TextField(blank=True, default="")
+    token_expires_at = models.DateTimeField(null=True, blank=True)
+    scope = models.CharField(max_length=255, blank=True, default="")
+
+    connected_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"GitHubOAuthConnection(user={self.user_id}, github={self.github_username})"

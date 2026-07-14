@@ -43,6 +43,7 @@ from django_api.serializers import (
 from django_api.services import (
     create_or_update_profile,
     delete_profile_image,
+    format_profile_response,
     get_profile,
     get_profile_image_path,
     parse_resume,
@@ -282,7 +283,7 @@ class ProfileDetailAPIView(APIView):
                 if get_profile_image_path(student_id)
                 else None
             )
-            return Response(profile, status=status.HTTP_200_OK)
+            return Response(format_profile_response(profile), status=status.HTTP_200_OK)
         except FileNotFoundError as exc:
             return api_error(str(exc), status.HTTP_404_NOT_FOUND)
         except Exception as exc:

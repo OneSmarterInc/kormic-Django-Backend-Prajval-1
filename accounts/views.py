@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.http import HttpResponse, HttpResponseRedirect
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -11,6 +14,17 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.db_utils import run_with_retry
+from accounts.github_oauth import (
+    GitHubOAuthError,
+    build_authorize_url,
+    consume_oauth_state,
+    create_oauth_state,
+    exchange_code_for_token,
+    fetch_github_identity,
+    get_connection_for_user,
+    revoke_and_delete,
+    save_connection,
+)
 from accounts.mfa import (
     clear_totp_failures,
     create_mfa_session,
@@ -20,6 +34,7 @@ from accounts.mfa import (
     record_totp_failure,
 )
 from accounts.models import TOTPBackupCode, TOTPDevice
+from accounts.permissions import IsStudentRole, IsTOTPEnrolled
 from accounts.serializers import (
     EnrollVerifySerializer,
     LoginSerializer,
@@ -34,6 +49,21 @@ from accounts.totp import (
     hash_backup_code,
     verify_totp_code,
 )
+
+
+def _github_oauth_html(title: str, message: str) -> str:
+    """
+    Self-contained confirmation page shown after the GitHub redirect when no
+    GITHUB_OAUTH_SUCCESS/FAILURE_REDIRECT_URL is configured for the SPA to
+    redirect back into. No external resources, so it's safe under any CSP.
+    """
+    return (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        f"<title>{title}</title></head>"
+        "<body style=\"font-family: sans-serif; text-align: center; padding: 4rem;\">"
+        f"<h2>{title}</h2><p>{message}</p>"
+        "<p>You can close this tab.</p></body></html>"
+    )
 
 
 def _user_has_confirmed_totp(user: User) -> bool:
@@ -271,3 +301,131 @@ class CurrentUserView(APIView):
 
     def get(self, request):
         return Response(serialize_user(request.user), status=status.HTTP_200_OK)
+
+
+class GitHubOAuthConnectView(APIView):
+    """
+    GET /api/auth/github/connect/
+
+    Starts the GitHub OAuth flow for the logged-in student. Returns a
+    GitHub authorize URL the frontend should do a full browser redirect to
+    (not fetch it -- GitHub's login/consent page can't be loaded via XHR).
+
+    A one-time `state` tying this request to the current user is cached for
+    a few minutes so /github/callback/ -- which arrives as a plain browser
+    redirect from GitHub with no Authorization header -- can tell which
+    student to attach the resulting token to, without trusting anything
+    GitHub sends other than the code itself.
+    """
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
+    throttle_scope = "auth"
+
+    def get(self, request):
+        try:
+            state = create_oauth_state(request.user.id)
+            authorize_url = build_authorize_url(state)
+        except GitHubOAuthError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        return Response({"authorize_url": authorize_url}, status=status.HTTP_200_OK)
+
+
+class GitHubOAuthCallbackView(APIView):
+    """
+    GET /api/auth/github/callback/
+
+    GitHub redirects the student's browser here after consent. There is no
+    JWT on this request, so identity comes solely from the cached `state`
+    minted in GitHubOAuthConnectView -- never from anything GitHub passes
+    other than the authorization `code`.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "auth"
+
+    def get(self, request):
+        error = request.query_params.get("error")
+        state = request.query_params.get("state")
+        code = request.query_params.get("code")
+
+        if error:
+            return self._failure(f"GitHub authorization was not completed ({error}).")
+
+        if not state or not code:
+            return self._failure("Missing state or code in GitHub's response.")
+
+        user_id = consume_oauth_state(state)
+        if not user_id:
+            return self._failure("This connection request expired or was already used. Please try again.")
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return self._failure("Account no longer exists.")
+
+        try:
+            token_response = exchange_code_for_token(code)
+            identity = fetch_github_identity(token_response["access_token"])
+            connection = save_connection(user, token_response, identity)
+        except GitHubOAuthError as exc:
+            return self._failure(str(exc))
+
+        return self._success(connection.github_username)
+
+    def _success(self, github_username: str):
+        redirect_url = os.getenv("GITHUB_OAUTH_SUCCESS_REDIRECT_URL")
+        if redirect_url:
+            return HttpResponseRedirect(f"{redirect_url}?github=connected&username={github_username}")
+
+        return HttpResponse(
+            _github_oauth_html("GitHub connected", f"Connected as @{github_username}."),
+            status=status.HTTP_200_OK,
+            content_type="text/html",
+        )
+
+    def _failure(self, reason: str):
+        redirect_url = os.getenv("GITHUB_OAUTH_FAILURE_REDIRECT_URL")
+        if redirect_url:
+            return HttpResponseRedirect(f"{redirect_url}?github=error")
+
+        return HttpResponse(
+            _github_oauth_html("GitHub connection failed", reason),
+            status=status.HTTP_400_BAD_REQUEST,
+            content_type="text/html",
+        )
+
+
+class GitHubOAuthStatusView(APIView):
+    """GET /api/auth/github/status/ -- never exposes the stored token itself."""
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
+
+    def get(self, request):
+        connection = get_connection_for_user(request.user)
+        if connection is None:
+            return Response({"connected": False}, status=status.HTTP_200_OK)
+
+        return Response(
+            {
+                "connected": True,
+                "github_username": connection.github_username,
+                "connected_at": connection.connected_at,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class GitHubOAuthDisconnectView(APIView):
+    """DELETE /api/auth/github/disconnect/"""
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
+
+    def delete(self, request):
+        connection = get_connection_for_user(request.user)
+        if connection is None:
+            return Response({"detail": "No GitHub connection to remove."}, status=status.HTTP_404_NOT_FOUND)
+
+        revoke_and_delete(connection)
+        return Response(status=status.HTTP_204_NO_CONTENT)

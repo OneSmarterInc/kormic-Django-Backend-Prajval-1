@@ -12,4 +12,8 @@ urlpatterns = [
     path("refresh/", TokenRefreshView.as_view(), name="auth_refresh"),
     path("logout/", views.LogoutView.as_view(), name="auth_logout"),
     path("me/", views.CurrentUserView.as_view(), name="auth_me"),
+    path("github/connect/", views.GitHubOAuthConnectView.as_view(), name="github_oauth_connect"),
+    path("github/callback/", views.GitHubOAuthCallbackView.as_view(), name="github_oauth_callback"),
+    path("github/status/", views.GitHubOAuthStatusView.as_view(), name="github_oauth_status"),
+    path("github/disconnect/", views.GitHubOAuthDisconnectView.as_view(), name="github_oauth_disconnect"),
 ]
