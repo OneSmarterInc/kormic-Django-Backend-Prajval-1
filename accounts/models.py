@@ -68,6 +68,9 @@ class GitHubOAuthConnection(models.Model):
     github_user_id = models.BigIntegerField()
     github_username = models.CharField(max_length=255)
 
+    github_name = models.CharField(max_length=255, blank=True, default="")
+    github_email = models.CharField(max_length=255, blank=True, default="")
+
     access_token_encrypted = models.TextField()
     refresh_token_encrypted = models.TextField(blank=True, default="")
     token_expires_at = models.DateTimeField(null=True, blank=True)

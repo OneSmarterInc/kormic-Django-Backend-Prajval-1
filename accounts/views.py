@@ -49,6 +49,7 @@ from accounts.totp import (
     hash_backup_code,
     verify_totp_code,
 )
+from verification.services import run_verification
 
 
 def _github_oauth_html(title: str, message: str) -> str:
@@ -69,6 +70,60 @@ def _github_oauth_html(title: str, message: str) -> str:
 def _user_has_confirmed_totp(user: User) -> bool:
     return TOTPDevice.objects.filter(user=user, confirmed_at__isnull=False).exists()
 
+
+def _student_verification_payload(user: User) -> dict:
+    """
+    Builds a light-weight verification summary for the logged-in student,
+    embedded on login/me responses. Thin wrapper around the single
+    canonical check in verification.services.run_verification -- must not
+    reimplement the matching logic here, or this and the dedicated
+    /api/verification/ endpoints can silently disagree about whether a
+    student is "verified".
+
+    Deliberately excludes the per-item detail list (see GET
+    /api/verification/items/ for that) so login/me stays small -- this is
+    just enough for the frontend to decide whether to route the student to
+    the verification screen at all.
+    """
+
+    account = getattr(user, "account", None)
+
+    if not account or str(account.role).lower() != "student":
+        return {
+            "verification_required": False,
+            "verification": None,
+        }
+
+    student_id = account.student_id
+
+    if not student_id:
+        return {
+            "verification_required": True,
+            "verification": {
+                "status": "incomplete",
+                "verified": False,
+                "message": "Student ID is missing for this account.",
+                "missing_sources": ["profile", "resume", "github", "linkedin"],
+                "pending_items_count": 0,
+            },
+        }
+
+    verification = run_verification(student_id, user=user)
+    verification.pop("items", None)
+    return {
+        "verification_required": not bool(verification.get("verified")),
+        "verification": verification,
+    }
+
+
+def _serialize_user_with_verification(user: User) -> dict:
+    user_data = serialize_user(user)
+    verification_payload = _student_verification_payload(user)
+
+    user_data["verification_required"] = verification_payload["verification_required"]
+    user_data["verification"] = verification_payload["verification"]
+
+    return user_data
 
 class RegisterView(APIView):
     permission_classes = [AllowAny]
@@ -274,7 +329,7 @@ class TOTPLoginVerifyView(APIView):
             {
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
-                "user": serialize_user(user),
+                "user": _serialize_user_with_verification(user),
             },
             status=status.HTTP_200_OK,
         )
@@ -300,7 +355,7 @@ class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        return Response(serialize_user(request.user), status=status.HTTP_200_OK)
+        return Response(_serialize_user_with_verification(request.user), status=status.HTTP_200_OK)
 
 
 class GitHubOAuthConnectView(APIView):

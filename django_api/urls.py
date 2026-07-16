@@ -49,8 +49,7 @@ urlpatterns = [
     path("queries/<int:query_id>/edit/", views.EditPendingQueryView.as_view(), name="edit-pending-query"),
     path("exports/pdf/<str:student_id>/", views.ExportProfilePDFView.as_view(), name="export-profile-pdf"),
 
-    # University Dashboard APIs (ported from the removed legacy FastAPI
-    # admin service that used to live at api/university_interface.py)
+    # University Dashboard APIs
     path("university/<str:university_id>/profiles/", views.UniversityProfilesListView.as_view(), name="university-profiles"),
     path(
         "university/<str:university_id>/profile/<str:student_id>/chat/",

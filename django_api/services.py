@@ -825,14 +825,36 @@ def parse_resume(student_id: str, uploaded_file) -> Dict[str, Any]:
     }
 
 
-def analyze_github(student_id: str, github_url: str) -> Dict[str, Any]:
+def analyze_github(student_id: str) -> Dict[str, Any]:
+    """
+    Analyzes the student's own OAuth-connected GitHub account only -- there
+    is no github_url parameter anymore.
+    """
     student_id = make_student_id(student_id)
     profile = load_profile_data(student_id)
 
-    from accounts.github_oauth import get_token_for_student_id
+    from accounts.github_oauth import (
+        GitHubNotConnectedError,
+        GitHubOAuthError,
+        get_connection_for_student_id,
+        get_valid_access_token,
+    )
     from agents.github_agent import GitHubSkillsAgent
 
-    student_token = get_token_for_student_id(student_id)
+    connection = get_connection_for_student_id(student_id)
+    if connection is None:
+        raise GitHubNotConnectedError("Connect your GitHub account before running analysis.")
+
+    github_url = f"https://github.com/{connection.github_username}"
+
+    try:
+        student_token = get_valid_access_token(connection)
+    except GitHubOAuthError:
+        # Their verified identity is still known even if the stored token
+        # needs reconnecting -- fall back to the shared server token for
+        # the actual API calls rather than blocking analysis entirely.
+        student_token = None
+
     github_agent = GitHubSkillsAgent(token=student_token)
 
     if hasattr(github_agent, "analyse"):
@@ -874,6 +896,7 @@ def analyze_github(student_id: str, github_url: str) -> Dict[str, Any]:
 
     return {
         "student_id": student_id,
+        "github_username": connection.github_username,
         "github_result": github_result,
         "skills_added": skills_added,
         "profile": profile,

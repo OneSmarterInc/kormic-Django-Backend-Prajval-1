@@ -46,8 +46,3 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
 class ResumeUploadSerializer(serializers.Serializer):
     student_id = serializers.CharField(required=True)
     file = serializers.FileField(required=True)
-
-
-class GitHubAnalyzeSerializer(serializers.Serializer):
-    student_id = serializers.CharField(required=True)
-    github_url = serializers.CharField(required=True)

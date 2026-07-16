@@ -33,6 +33,10 @@ class GitHubOAuthError(RuntimeError):
     pass
 
 
+class GitHubNotConnectedError(GitHubOAuthError):
+    pass
+
+
 def _client_id() -> str:
     value = os.getenv("GITHUB_OAUTH_CLIENT_ID")
     if not value:
@@ -171,6 +175,8 @@ def save_connection(user: User, token_response: Dict[str, Any], identity: Dict[s
         defaults={
             "github_user_id": identity["id"],
             "github_username": identity.get("login", ""),
+            "github_name": identity.get("name") or "",
+            "github_email": identity.get("email") or "",
             **fields,
         },
     )
@@ -198,25 +204,12 @@ def get_valid_access_token(connection: GitHubOAuthConnection) -> str:
     return decrypt_secret(connection.access_token_encrypted)
 
 
-def get_token_for_student_id(student_id: str) -> Optional[str]:
-    """
-    Used by GitHub analysis: prefer the student's own connected token so
-    their scans count against their personal rate limit. Returns None if
-    the student hasn't connected GitHub (callers should fall back to the
-    shared server-side GITHUB_TOKEN, same as before this feature existed).
-    """
+def get_connection_for_student_id(student_id: str) -> Optional[GitHubOAuthConnection]:
     account = Account.objects.filter(student_id=student_id).select_related("user").first()
     if account is None:
         return None
 
-    connection = get_connection_for_user(account.user)
-    if connection is None:
-        return None
-
-    try:
-        return get_valid_access_token(connection)
-    except GitHubOAuthError:
-        return None
+    return get_connection_for_user(account.user)
 
 
 def revoke_and_delete(connection: GitHubOAuthConnection) -> None:

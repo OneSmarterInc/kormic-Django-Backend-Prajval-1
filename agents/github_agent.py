@@ -620,6 +620,8 @@ GITHUB DATA:
             assessment = self._fallback_assessment(raw_data)
 
         assessment["username"] = raw_data["username"]
+       
+        assessment["name"] = raw_data.get("name") or raw_data["username"]
         assessment["source"] = "github"
         assessment["verified"] = True
         assessment["generated_at"] = raw_data.get("generated_at")

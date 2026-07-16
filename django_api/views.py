@@ -13,6 +13,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.github_oauth import GitHubNotConnectedError
 from accounts.permissions import (
     IsStudentOrUniversityRole,
     IsStudentRole,
@@ -38,7 +39,6 @@ from django_api.models import (
 from django_api.serializers import (
     ProfileCreateUpdateSerializer,
     ResumeUploadSerializer,
-    GitHubAnalyzeSerializer,
 )
 from django_api.services import (
     create_or_update_profile,
@@ -119,6 +119,12 @@ def api_home(request):
             "answer_query": "POST /api/queries/answer/",
             "edit_query": "POST /api/queries/<query_id>/edit/",
             "profile_pdf": "GET /api/exports/pdf/<student_id>/",
+        },
+        "verification_apis": {
+            "verification_status": "GET /api/verification/status/",
+            "verification_reanalyze": "POST /api/verification/reanalyze/",
+            "verification_items": "GET /api/verification/items/",
+            "verification_item_decision": "POST /api/verification/items/<item_id>/decision/",
         },
         "university_dashboard_apis": {
             "profiles": "GET /api/university/<university_id>/profiles/",
@@ -452,36 +458,31 @@ class ResumeDetailAPIView(APIView):
 class GitHubAnalyzeAPIView(APIView):
     """
     POST /api/profile/github/
-    Analyze GitHub and update profile skills/evidence.
+    Analyzes the student's own OAuth-connected GitHub account (§3.5) --
+    no request body. There is no way to point this at someone else's
+    GitHub profile; the username always comes from the verified OAuth
+    connection, never from client input.
     """
 
     permission_classes = STUDENT_PERMISSIONS
 
     def post(self, request):
-        data = request.data.copy()
-        data["student_id"] = request.user.account.student_id
-        serializer = GitHubAnalyzeSerializer(data=data)
-
-        if not serializer.is_valid():
-            return Response(
-                {"status": "error", "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        student_id = request.user.account.student_id
 
         try:
-            result = analyze_github(
-                student_id=serializer.validated_data["student_id"],
-                github_url=serializer.validated_data["github_url"],
-            )
+            result = analyze_github(student_id=student_id)
             return Response(
                 {
                     "status": "success",
                     "student_id": result["student_id"],
+                    "github_username": result["github_username"],
                     "skills_added": result["skills_added"],
                     "github_result": result["github_result"],
                 },
                 status=status.HTTP_200_OK,
             )
+        except GitHubNotConnectedError as exc:
+            return api_error(str(exc), status.HTTP_400_BAD_REQUEST)
         except Exception as exc:
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)
 
