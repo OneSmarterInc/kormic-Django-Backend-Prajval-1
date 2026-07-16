@@ -15,6 +15,13 @@ class StudentProfile(models.Model):
 
     student_id = models.CharField(max_length=255, unique=True, db_index=True)
 
+    # Display name for this student's personal agent -- the single entry
+    # point the student talks to. Auto-assigned on first use (see
+    # agents.agent_identity.generate_unique_agent_name) and student-editable
+    # afterward. null=True (not "") so multiple not-yet-assigned rows don't
+    # collide on the unique constraint.
+    agent_name = models.CharField(max_length=100, unique=True, null=True, blank=True, db_index=True)
+
     name = models.CharField(max_length=255, blank=True, default="")
     email = models.CharField(max_length=255, blank=True, default="")
     country = models.CharField(max_length=255, blank=True, default="")
@@ -124,15 +131,18 @@ class IntakeSession(models.Model):
 class ChatMessage(models.Model):
     """
     Persistent per-turn chat transcript for Aria, university, profile-presenter,
-    and intake chat, replacing the in-process-only ARIA_SESSIONS / UNIVERSITY_AGENTS
-    / PROFILE_PRESENTERS dicts that were lost on every server restart.
+    and intake chat, replacing the in-process-only agent-cache dicts (now in
+    agents/commons.py) that were lost on every server restart.
 
     student_id/university_id are plain strings (not FKs) since a chat turn can
     happen before a StudentProfile row is ever saved.
     """
 
     class Channel(models.TextChoices):
-        ARIA = "aria", "Aria"
+        # The student's single persistent chat thread with their own agent.
+        # Formerly "aria" -- renamed since the agent's display name is now
+        # per-student and student-editable, not a fixed product name.
+        AGENT = "agent", "Agent"
         UNIVERSITY = "university", "University"
         PRESENTER = "presenter", "Presenter"
         INTAKE = "intake", "Intake"

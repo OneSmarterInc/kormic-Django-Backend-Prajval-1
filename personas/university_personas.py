@@ -180,6 +180,12 @@ UNIVERSITY_PERSONAS = {
         "agent_name": "Raider",
         "location": "Fairborn, Ohio",
         "tagline": "The AFRL connection. Real research, real value.",
+        # Phrases that identify this university in a student's message --
+        # the single source of truth for university matching. Previously
+        # duplicated as separate hardcoded keyword lists in
+        # agents/student_agent.py; now read from here via
+        # agents.commons.match_university_ids().
+        "keywords": ["wright state", "wright", "raider"],
         "constitution": WRIGHT_STATE_CONSTITUTION,
         "scrape_urls": [
             "https://engineering-computer-science.wright.edu/computer-science-and-engineering",
@@ -279,6 +285,7 @@ UNIVERSITY_PERSONAS = {
         "agent_name": "Franklin",
         "location": "Columbus, Ohio / Online",
         "tagline": "Flexible, career-focused MSCS pathways.",
+        "keywords": ["franklin", "franklin university"],
         "constitution": FRANKLIN_CS_CONSTITUTION,
         "scrape_urls": [
             "https://www.franklin.edu/degrees/masters/computer-science-programs",

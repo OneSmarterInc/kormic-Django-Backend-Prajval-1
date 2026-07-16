@@ -19,21 +19,22 @@ urlpatterns = [
     ),
     path("profile/<str:student_id>/", views.ProfileDetailAPIView.as_view(), name="profile-detail"),
     path("profile/<str:student_id>/image/", views.ProfileImageDetailAPIView.as_view(), name="profile-image-detail"),
+    path("profile/agent-name/", views.AgentNameAPIView.as_view(), name="agent-name"),
 
     # Persistent GET APIs for profile sub-resource history
     path("profile/<str:student_id>/resumes/", views.ResumeHistoryView.as_view(), name="profile-resume-history"),
     path("profile/<str:student_id>/github-history/", views.GitHubHistoryView.as_view(), name="profile-github-history"),
     path("profile/<str:student_id>/linkedin-history/", views.LinkedInHistoryView.as_view(), name="profile-linkedin-history"),
 
-    # APIs 6-8: Chat
+    # API 6-7: Chat -- the student's personal agent is the only student-facing
+    # chat endpoint. Verification/university-fit/university-chat happen only
+    # as background orchestrator calls from inside agent_chat (see agents/commons.py).
     path("chat/intake/", views.profile_intake_chat, name="profile-intake-chat"),
-    path("chat/aria/", views.aria_chat, name="aria-chat"),
-    path("chat/aria/history/", views.aria_chat_history, name="aria-chat-history"),
-    path("chat/university/<str:university_id>/", views.university_chat, name="university-chat"),
-    path("chat/university/<str:university_id>/history/", views.university_chat_history, name="university-chat-history"),
+    path("chat/agent/", views.agent_chat, name="agent-chat"),
+    path("chat/agent/history/", views.agent_chat_history, name="agent-chat-history"),
 
-    # API 9: Fit Assessment
-    path("assessments/generate/<str:university_id>/", views.generate_fit_assessment, name="generate-fit-assessment"),
+    # Fit assessment history is read-only now -- generation happens only via
+    # agent_chat (agents.commons.generate_fit_assessment), never a direct POST.
     path("assessments/<str:student_id>/", views.AssessmentHistoryView.as_view(), name="assessment-history"),
     path(
         "assessments/<str:university_id>/<str:student_id>/",

@@ -17,9 +17,8 @@ NEXT_STEPS = {
     "github": "POST /api/profile/github/",
     "linkedin": "POST /api/profile/linkedin/",
     "verification_status": "GET /api/verification/status/",
-    "verification_reanalyze": "POST /api/verification/reanalyze/",
     "verification_items": "GET /api/verification/items/",
-    "verification_item_decision": "POST /api/verification/items/<item_id>/decision/",
+    "agent_chat": "POST /api/chat/agent/ -- ask your agent to review your profile to trigger reanalysis or resolve a flagged item",
 }
 
 RESOLUTION_BY_ACTION = {

@@ -78,12 +78,6 @@ def log_chat_turn(*, channel, student_id, university_id="", user_message="", ass
     )
 
 
-# In-memory cache while Django server is running.
-ARIA_SESSIONS: Dict[str, Any] = {}
-UNIVERSITY_AGENTS: Dict[str, Any] = {}
-PROFILE_PRESENTERS: Dict[str, Any] = {}
-
-
 # ---------------------------------------------------------------------
 # Home / health check
 # ---------------------------------------------------------------------
@@ -91,6 +85,8 @@ PROFILE_PRESENTERS: Dict[str, Any] = {}
 @api_view(["GET"])
 @permission_classes([AllowAny])
 def api_home(request):
+    from agents import commons
+
     return Response({
         "message": "Korgut Commons Django REST API is running",
         "profile_apis": {
@@ -106,14 +102,14 @@ def api_home(request):
             "profile_image_upload": "POST /api/profile/image/",
             "profile_image": "GET /api/profile/<student_id>/image/",
             "profile_image_delete": "DELETE /api/profile/<student_id>/image/",
+            "agent_name": "GET/PATCH /api/profile/agent-name/",
         },
         "chat_apis": {
             "profile_intake": "POST /api/chat/intake/",
-            "aria_chat": "POST /api/chat/aria/",
-            "university_chat": "POST /api/chat/university/<university_id>/",
+            "agent_chat": "POST /api/chat/agent/",
+            "agent_chat_history": "GET /api/chat/agent/history/",
         },
         "core_apis": {
-            "fit_assessment": "POST /api/assessments/generate/<university_id>/",
             "roadmap": "GET /api/roadmap/<student_id>/",
             "pending_queries": "GET /api/queries/pending/",
             "answer_query": "POST /api/queries/answer/",
@@ -122,9 +118,11 @@ def api_home(request):
         },
         "verification_apis": {
             "verification_status": "GET /api/verification/status/",
-            "verification_reanalyze": "POST /api/verification/reanalyze/",
             "verification_items": "GET /api/verification/items/",
-            "verification_item_decision": "POST /api/verification/items/<item_id>/decision/",
+        },
+        "assessment_apis": {
+            "assessment_history": "GET /api/assessments/<student_id>/",
+            "assessment_detail": "GET /api/assessments/<university_id>/<student_id>/",
         },
         "university_dashboard_apis": {
             "profiles": "GET /api/university/<university_id>/profiles/",
@@ -135,7 +133,12 @@ def api_home(request):
             "archive_queries": "GET /api/university/<university_id>/queries/archive/",
             "verified_knowledge": "GET /api/university/<university_id>/knowledge/verified/",
         },
-        "university_ids": ["wright_state_cs", "franklin_cs"],
+        "university_ids": commons.list_university_ids(),
+        "notes": (
+            "University agents and the verification/fit-assessment action endpoints are "
+            "no longer directly student-facing -- the student's personal agent (agent_chat) "
+            "is the single entry point and reaches them in the background."
+        ),
     })
 
 
@@ -178,15 +181,6 @@ def extract_number(value: str):
 
     number = float(match.group(1))
     return int(number) if number.is_integer() else number
-
-
-def safe_number(value: Any, default: float = 0.0) -> float:
-    try:
-        if value is None or value == "":
-            return default
-        return float(value)
-    except Exception:
-        return default
 
 
 def load_profile_or_404(student_id):
@@ -701,332 +695,97 @@ def profile_intake_chat(request):
 
 
 # ---------------------------------------------------------------------
-# Agent loading
+# Agent name (setup + rename)
 # ---------------------------------------------------------------------
 
-def get_aria_agent(student_id: str):
-    key = make_student_id(student_id)
-    if key not in ARIA_SESSIONS:
-        from agents.student_agent import StudentAgent
-        profile = load_profile_data(student_id)
-        try:
-            ARIA_SESSIONS[key] = StudentAgent(profile, student_id=key)
-        except TypeError:
-            ARIA_SESSIONS[key] = StudentAgent(profile, student_name=profile.get("name"), student_id=key)
-    return ARIA_SESSIONS[key]
+class AgentNameAPIView(APIView):
+    """
+    GET /api/profile/agent-name/ — return this student's personal agent's
+    display name, auto-assigning a default one on first call.
+    PATCH /api/profile/agent-name/ — rename it. Body: {"agent_name": "..."}.
+    Names must be unique (case-insensitive) across all students.
+    """
 
+    permission_classes = STUDENT_PERMISSIONS
 
-def get_university_agent(university_id: str):
-    if university_id in UNIVERSITY_AGENTS:
-        return UNIVERSITY_AGENTS[university_id]
+    def get(self, request):
+        from agents.agent_identity import ensure_agent_name
 
-    from agents.university_agent import UniversityAgent
-    from personas.university_personas import UNIVERSITY_PERSONAS
+        student_id = request.user.account.student_id
+        profile, _ = StudentProfile.objects.get_or_create(student_id=make_student_id(student_id))
+        agent_name = ensure_agent_name(profile)
+        return Response({"agent_name": agent_name})
 
-    if university_id not in UNIVERSITY_PERSONAS:
-        raise ValueError(f"Unknown university_id: {university_id}")
-
-    auto_scrape = os.getenv("KORGUT_AUTO_SCRAPE", "false").lower() == "true"
-
-    try:
-        agent = UniversityAgent(university_id, auto_scrape=auto_scrape)
-    except TypeError:
-        agent = UniversityAgent(university_id)
-
-    UNIVERSITY_AGENTS[university_id] = agent
-
-    try:
+    def patch(self, request):
         from agents import commons
-        commons.register(university_id, agent)
-    except Exception:
-        pass
+        from agents.agent_identity import is_agent_name_available
 
-    return agent
-
-
-# ---------------------------------------------------------------------
-# API 7: Aria Chat
-# ---------------------------------------------------------------------
-
-@api_view(["POST"])
-@permission_classes(STUDENT_PERMISSIONS)
-def aria_chat(request):
-    student_id = request.user.account.student_id
-    message = request.data.get("message")
-
-    if not message:
-        return api_error("message is required.")
-
-    try:
-        aria = get_aria_agent(student_id)
-        reply = aria.chat(message)
-        if hasattr(aria, "student_profile"):
-            save_profile_data(student_id, aria.student_profile)
-        log_chat_turn(
-            channel=ChatMessage.Channel.ARIA,
-            student_id=student_id,
-            user_message=message,
-            assistant_message=reply or "",
-        )
-        return Response({"agent": "Aria", "student_id": student_id, "reply": reply})
-    except Exception as exc:
-        return api_error(f"Aria chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["GET"])
-@permission_classes(STUDENT_PERMISSIONS)
-def aria_chat_history(request):
-    student_id = request.user.account.student_id
-    messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.ARIA, student_id=student_id)
-    return Response({
-        "count": messages.count(),
-        "messages": [
-            {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
-            for m in messages
-        ],
-    })
-
-
-# ---------------------------------------------------------------------
-# API 8: University Chat
-# ---------------------------------------------------------------------
-
-@api_view(["POST"])
-@permission_classes(STUDENT_PERMISSIONS)
-def university_chat(request, university_id: str):
-    student_id = request.user.account.student_id
-    message = request.data.get("message")
-
-    if not message:
-        return api_error("message is required.")
-
-    try:
-        profile = load_profile_data(student_id)
-        agent = get_university_agent(university_id)
-        result = agent.answer(message, profile)
-        agent_name = result.get("agent_name") or university_id
-        pending_query = result.get("pending_query") or {}
-        reply = result.get("answer")
-        log_chat_turn(
-            channel=ChatMessage.Channel.UNIVERSITY,
-            student_id=student_id,
-            university_id=university_id,
-            user_message=message,
-            assistant_message=reply or "",
-            meta={
-                "pending": result.get("pending", False),
-                "query_id": result.get("query_id") or pending_query.get("query_id"),
-                "confidence": result.get("confidence"),
-            },
-        )
-        return Response({
-            "agent": agent_name,
-            "university": result.get("university"),
-            "student_id": student_id,
-            "reply": reply,
-            "pending": result.get("pending", False),
-            "query_id": result.get("query_id") or pending_query.get("query_id"),
-            "confidence": result.get("confidence"),
-        })
-    except ValueError as exc:
-        return api_error(str(exc), status.HTTP_404_NOT_FOUND)
-    except Exception as exc:
-        return api_error(f"University chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(["GET"])
-@permission_classes(STUDENT_PERMISSIONS)
-def university_chat_history(request, university_id: str):
-    student_id = request.user.account.student_id
-    messages = ChatMessage.objects.filter(
-        channel=ChatMessage.Channel.UNIVERSITY, student_id=student_id, university_id=university_id
-    )
-    return Response({
-        "count": messages.count(),
-        "messages": [
-            {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
-            for m in messages
-        ],
-    })
-
-
-# ---------------------------------------------------------------------
-# API 9: Fit Assessment
-# ---------------------------------------------------------------------
-
-def _fallback_fit_assessment(profile: Dict[str, Any], university_id: str, agent: Optional[Any] = None) -> Dict[str, Any]:
-    gpa = safe_number(profile.get("gpa"), 0)
-    gpa_scale = safe_number(profile.get("gpa_scale"), 10)
-    gre_quant = safe_number(profile.get("gre_quant"), 0)
-    toefl = safe_number(profile.get("toefl"), 0)
-    ielts = safe_number(profile.get("ielts"), 0)
-    budget = safe_number(profile.get("budget"), 0)
-    major = str(profile.get("major", "")).lower()
-    program = str(profile.get("program", "")).lower()
-    research = str(profile.get("research", "")).lower()
-
-    score = 45
-    strengths = []
-    gaps = []
-    gpa_percent = gpa / gpa_scale if gpa_scale > 0 else 0
-
-    if gpa_percent >= 0.80:
-        score += 15
-        strengths.append("Strong academic profile based on GPA.")
-    elif gpa_percent >= 0.70:
-        score += 8
-        strengths.append("Decent academic profile.")
-    else:
-        gaps.append("GPA may need stronger support through projects, GRE, or experience.")
-
-    if "computer" in major or "cs" in major or "computer" in program or "science" in program or "software" in program:
-        score += 12
-        strengths.append("Academic background aligns with Computer Science.")
-    else:
-        gaps.append("Program background alignment should be explained clearly.")
-
-    if gre_quant >= 165:
-        score += 10
-        strengths.append("Strong GRE Quant score.")
-    elif gre_quant >= 160:
-        score += 6
-        strengths.append("Good GRE Quant score.")
-    elif gre_quant > 0:
-        gaps.append("GRE Quant score may be moderate for CS programs.")
-    else:
-        gaps.append("GRE score is missing or not provided.")
-
-    if toefl >= 90:
-        score += 8
-        strengths.append("TOEFL score looks acceptable for many graduate programs.")
-    elif ielts >= 6.5:
-        score += 8
-        strengths.append("IELTS score looks acceptable for many graduate programs.")
-    elif toefl > 0 or ielts > 0:
-        gaps.append("English proficiency score should be verified against the university minimum.")
-    else:
-        gaps.append("English proficiency score is missing.")
-
-    if any(word in research for word in ["ai", "ml", "web", "project", "research", "internship"]):
-        score += 8
-        strengths.append("Projects/research experience supports the application.")
-    else:
-        gaps.append("More project or research detail would improve the profile.")
-
-    if budget >= 40000:
-        score += 7
-        strengths.append("Budget appears reasonable for many US graduate options, but tuition must be verified.")
-    elif budget >= 25000:
-        score += 3
-        gaps.append("Budget may need careful planning depending on tuition and living cost.")
-    else:
-        gaps.append("Budget may be tight for US graduate study.")
-
-    if university_id == "wright_state_cs":
-        university_name = "Wright State University — CS & Engineering"
-        agent_name = "Raider"
-    elif university_id == "franklin_cs":
-        university_name = "Franklin University — M.S. Computer Science"
-        agent_name = "Franklin"
-        score += 3
-    else:
-        university_name = university_id
-        agent_name = getattr(agent, "agent_name", university_id) if agent else university_id
-
-    score = max(0, min(100, int(score)))
-
-    if score >= 80:
-        match_tier = "strong"
-        recommendation = "recommend"
-        realistic = True
-    elif score >= 65:
-        match_tier = "target"
-        recommendation = "recommend"
-        realistic = True
-    elif score >= 50:
-        match_tier = "possible"
-        recommendation = "consider"
-        realistic = True
-    else:
-        match_tier = "reach"
-        recommendation = "consider"
-        realistic = False
-
-    return {
-        "match_tier": match_tier,
-        "match_score": score,
-        "fit_summary": f"Based on the available profile, this looks like a {match_tier} fit for {university_name}.",
-        "strengths_for_program": strengths or ["Basic profile information is available for assessment."],
-        "gaps_for_program": gaps or ["Verify official requirements on the university website."],
-        "recommendation": recommendation,
-        "realistic": realistic,
-        "specific_advice": "Verify tuition, deadlines, GRE/TOEFL, and funding before final decision.",
-        "university": university_name,
-        "agent": agent_name,
-        "assessment_source": "api_fallback",
-    }
-
-
-def _assessment_failed(assessment: Any) -> bool:
-    if not isinstance(assessment, dict):
-        return True
-    if assessment.get("match_tier") == "unknown":
-        return True
-    if int(assessment.get("match_score") or 0) <= 0:
-        return True
-    return False
-
-
-@api_view(["POST"])
-@permission_classes(STUDENT_PERMISSIONS)
-def generate_fit_assessment(request, university_id: str):
-    student_id = request.user.account.student_id
-    force = str(request.query_params.get("force", "")).strip().lower() in ("1", "true", "yes")
-
-    try:
+        student_id = request.user.account.student_id
         student_key = make_student_id(student_id)
+        new_name = str(request.data.get("agent_name", "")).strip()
 
-        if not force:
-            cached = (
-                FitAssessment.objects.filter(student__student_id=student_key, university_id=university_id)
-                .order_by("-created_at")
-                .first()
-            )
-            if cached:
-                response_data = dict(cached.assessment)
-                response_data["cached"] = True
-                response_data["generated_at"] = cached.created_at
-                return Response(response_data, status=status.HTTP_200_OK)
+        if not new_name:
+            return api_error("agent_name is required.")
+        if len(new_name) > 100:
+            return api_error("agent_name must be 100 characters or fewer.")
+        if not is_agent_name_available(new_name, exclude_student_id=student_key):
+            return api_error("This agent name is already taken. Please choose another.", status.HTTP_409_CONFLICT)
 
-        profile = load_profile_data(student_id)
-        agent = get_university_agent(university_id)
-        try:
-            assessment = agent.assess_fit(profile)
-        except Exception:
-            assessment = None
+        profile, _ = StudentProfile.objects.get_or_create(student_id=student_key)
+        profile.agent_name = new_name
+        profile.save(update_fields=["agent_name", "updated_at"])
 
-        if _assessment_failed(assessment):
-            assessment = _fallback_fit_assessment(profile, university_id, agent)
+        # Evict the cached agent so the next chat turn rebuilds with the new name.
+        commons.drop_student_agent(student_key)
 
-        profile.setdefault("assessments", {})
-        profile["assessments"][university_id] = assessment
-        save_profile_data(student_id, profile)
+        return Response({"agent_name": profile.agent_name})
 
-        row = FitAssessment.objects.create(
-            student=StudentProfile.objects.get(student_id=student_key),
-            university_id=university_id,
-            assessment=assessment,
+
+# ---------------------------------------------------------------------
+# API 7: Personal Agent Chat -- the student's single entry point.
+# Verification, GitHub/LinkedIn/resume interpretation, and university fit
+# checks all happen through this one endpoint; see agents/commons.py.
+# ---------------------------------------------------------------------
+
+@api_view(["POST"])
+@permission_classes(STUDENT_PERMISSIONS)
+def agent_chat(request):
+    from agents import commons
+
+    student_id = request.user.account.student_id
+    message = request.data.get("message")
+
+    if not message:
+        return api_error("message is required.")
+
+    try:
+        agent = commons.get_student_agent(student_id)
+        reply = agent.chat(message)
+        if hasattr(agent, "student_profile"):
+            save_profile_data(student_id, agent.student_profile)
+        log_chat_turn(
+            channel=ChatMessage.Channel.AGENT,
+            student_id=student_id,
+            user_message=message,
+            assistant_message=reply or "",
         )
-
-        response_data = dict(assessment)
-        response_data["cached"] = False
-        response_data["generated_at"] = row.created_at
-
-        return Response(response_data, status=status.HTTP_200_OK)
-    except ValueError as exc:
-        return api_error(str(exc), status.HTTP_404_NOT_FOUND)
+        return Response({"agent": agent.agent_name, "student_id": student_id, "reply": reply})
     except Exception as exc:
-        return api_error(f"Fit assessment failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+        return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET"])
+@permission_classes(STUDENT_PERMISSIONS)
+def agent_chat_history(request):
+    student_id = request.user.account.student_id
+    messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.AGENT, student_id=student_id)
+    return Response({
+        "count": messages.count(),
+        "messages": [
+            {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
+            for m in messages
+        ],
+    })
 
 
 class AssessmentHistoryView(APIView):
@@ -1322,8 +1081,8 @@ class AnswerPendingQueryView(APIView):
             )
 
         try:
-            from agents.university_agent import UniversityAgent
-            agent = UniversityAgent(university_id=university_id, auto_scrape=False)
+            from agents import commons
+            agent = commons.get_university_agent(university_id)
             resolved = agent.resolve_pending_query(query_id=query_id_int, answer=answer, answered_by=answered_by)
             if not resolved:
                 return Response({"status": "failed", "message": "Could not resolve pending query."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1402,13 +1161,6 @@ class ExportProfilePDFView(APIView):
 # Ported from the legacy standalone FastAPI admin service that used to live
 # at api/university_interface.py (removed — superseded by these routes).
 # ---------------------------------------------------------------------
-
-def get_profile_presenter(university_id: str):
-    if university_id not in PROFILE_PRESENTERS:
-        from agents.profile_presenter import ProfilePresenterAgent
-        PROFILE_PRESENTERS[university_id] = ProfilePresenterAgent(university_id)
-    return PROFILE_PRESENTERS[university_id]
-
 
 def serialize_pending_query(query: "PendingQuery") -> Dict[str, Any]:
     return {
@@ -1498,7 +1250,7 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
     """
     POST /api/university/<university_id>/profile/<student_id>/chat/
     University-officer-facing chat about one student (ProfilePresenterAgent) —
-    distinct from /api/chat/aria/, which is the student-facing agent.
+    distinct from /api/chat/agent/, which is the student-facing agent.
     student_id is intentionally unrestricted here (any student in the
     university's own dashboard may be asked about) — only university_id
     is scoped, via ScopedToOwnUniversityId in UNIVERSITY_OWNER_PERMISSIONS.
@@ -1515,7 +1267,8 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
         return Response({"answer": "Profile not found."})
 
     try:
-        presenter = get_profile_presenter(university_id)
+        from agents import commons
+        presenter = commons.get_profile_presenter(university_id)
         answer = presenter.answer(question=question, profile=profile, conversation_history=history)
         log_chat_turn(
             channel=ChatMessage.Channel.PRESENTER,
@@ -1667,8 +1420,8 @@ class EditPendingQueryView(APIView):
             )
 
         try:
-            from agents.university_agent import UniversityAgent
-            agent = UniversityAgent(university_id=university_id, auto_scrape=False)
+            from agents import commons
+            agent = commons.get_university_agent(university_id)
             resolved = agent.resolve_pending_query(query_id=query_id, answer=answer, answered_by=answered_by)
             if not resolved:
                 return Response({"status": "failed", "message": "Could not edit query."}, status=status.HTTP_400_BAD_REQUEST)

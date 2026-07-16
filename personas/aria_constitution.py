@@ -1,15 +1,17 @@
 # personas/aria_constitution.py
-# Aria — The Student Advocate
-# Her personality is defined here and injected into every conversation.
-# Change this file to evolve her character. Every conversation reflects it.
+# The student's personal agent — a single advisor persona, given a
+# per-student display name (student-editable, see agents/agent_identity.py).
+# The character/behaviour below is shared by every student's agent; only the
+# name changes. Change this file to evolve the character -- every student's
+# agent reflects it.
 
 from __future__ import annotations
 
 from typing import Any, Iterable
 
 
-ARIA_CONSTITUTION = """
-You are Aria, a graduate admissions advisor living in the Korgut Commons.
+AGENT_CONSTITUTION_TEMPLATE = """
+You are {agent_name}, a graduate admissions advisor living in the Korgut Commons.
 
 YOUR IDENTITY:
 You are a genuine advocate for every student you work with. You have seen
@@ -318,12 +320,14 @@ def _append_profile_scores(profile_lines: list[str], student_profile: dict) -> N
         ])
 
 
-def build_aria_system_prompt(student_profile: dict) -> str:
+def build_agent_system_prompt(student_profile: dict, agent_name: str = "Aria") -> str:
     """
-    Build Aria's complete system prompt by combining her constitution
-    with the specific student's profile context.
+    Build the student's personal agent's complete system prompt by combining
+    the shared constitution (with this student's chosen agent name filled
+    in) with the specific student's profile context.
     """
     student_profile = student_profile or {}
+    agent_name = agent_name or "Aria"
 
     profile_lines = [
         f"Name: {student_profile.get('name', 'Unknown')}",
@@ -361,9 +365,11 @@ def build_aria_system_prompt(student_profile: dict) -> str:
 
     profile_context = "\n\nSTUDENT YOU ARE ADVISING:\n" + "\n".join(profile_lines)
 
+    from personas.university_personas import UNIVERSITY_PERSONAS
+
     profile_context += "\n\nUNIVERSITY AGENTS AVAILABLE IN THE KORGUT COMMONS:\n"
-    profile_context += "- wright_state_cs: Wright State University Computer Science\n"
-    profile_context += "- franklin_cs: Franklin University MS Computer Science, if configured\n"
+    for university_id, persona in UNIVERSITY_PERSONAS.items():
+        profile_context += f"- {university_id}: {persona.get('name', university_id)}\n"
     profile_context += "More agents may be added as the Commons grows.\n"
 
     profile_context += """
@@ -372,6 +378,9 @@ FINAL OPERATING RULES:
 - If the profile has missing or conflicting data, ask for clarification only when needed.
 - If a university-specific fact is not verified, consult the relevant university agent.
 - If the university agent cannot verify it, say that the item needs human confirmation.
+- The student only knows you -- never suggest they contact a university agent, the
+  verification system, or any other backend agent directly. You are the only interface
+  they have; consult those agents yourself, in the background, and report back.
 """
 
-    return ARIA_CONSTITUTION + profile_context
+    return AGENT_CONSTITUTION_TEMPLATE.format(agent_name=agent_name) + profile_context

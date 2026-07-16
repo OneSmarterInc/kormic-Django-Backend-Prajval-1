@@ -22,7 +22,8 @@ from typing import Any, Dict, Optional
 
 import anthropic
 from agents import commons
-from personas.aria_constitution import build_aria_system_prompt
+from personas.aria_constitution import build_agent_system_prompt
+from personas.university_personas import UNIVERSITY_PERSONAS
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -66,19 +67,25 @@ class StudentAgent:
         profile=None,
         student_name: Optional[str] = None,
         student_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
     ):
-        """Create Aria.
+        """Create the student's personal agent.
 
         Args:
-            student_profile: Normal dict used by Aria's prompt.
+            student_profile: Normal dict used by the agent's prompt.
             profile: Optional StudentProfile object that persists insights,
                 university assessments, and summary to disk.
             student_name: Optional explicit name fallback.
             student_id: Canonical student_id (as used by StudentProfile/ChatMessage)
-                used to key Aria's persistent DB memory. Falls back to a
+                used to key the agent's persistent DB memory. Falls back to a
                 name-derived key when not supplied.
+            agent_name: This student's chosen (or auto-assigned) display name
+                for their personal agent. Defaults to "Aria" only as a last
+                resort -- callers going through agents.commons.get_student_agent()
+                always pass the student's actual agent_name.
         """
         self.profile = profile
+        self.agent_name = agent_name or "Aria"
         self.roadmap_planner = (
             RoadmapPlanner()
             if RoadmapPlanner is not None
@@ -108,7 +115,12 @@ class StudentAgent:
         self.memory: Dict[str, Any] = {}
         self.load_memory()
 
-        self.system_prompt = build_aria_system_prompt(self.student_profile)
+        # Tracks a verification item this agent just surfaced in chat and is
+        # waiting on a confirm/ignore/clarify reply for. Process-local, same
+        # lifecycle as the rest of this session's in-memory state.
+        self._pending_verification_item_id: Optional[int] = None
+
+        self.system_prompt = build_agent_system_prompt(self.student_profile, self.agent_name)
 
         self.profile_intelligence = (
             ProfileIntelligenceService()
@@ -312,33 +324,21 @@ Use short paragraphs.
             "improve", "recommendation", "should i apply", "should i choose",
             "am i suitable", "am i eligible", "chances", "chance",
         ]
-        university_keywords = [
-            "wright", "wright state", "raider",
-            "franklin", "franklin university",
-        ]
         return (
             any(keyword in lower_msg for keyword in fit_keywords)
-            and any(keyword in lower_msg for keyword in university_keywords)
+            and bool(commons.match_university_ids(lower_msg))
         )
 
     def _generate_fit_assessment_if_needed(self, university_id: str) -> Optional[dict]:
-        """Lazily generate a fit assessment only when the student asks for it.
-
-        If the assessment already exists in StudentProfile, reuse it without
-        another Anthropic call.
+        """Lazily generate a fit assessment only when the student asks for it,
+        via the orchestrator (agents.commons) -- the university agent never
+        talks to the student directly. If the assessment already exists,
+        reuse it without another Anthropic call.
         """
-        if self.profile is None or not hasattr(self.profile, "data"):
-            return None
-
-        assessments = self.profile.data.setdefault("assessments", {})
+        assessments = self.student_profile.setdefault("assessments", {})
         existing = assessments.get(university_id)
         if existing:
-            self.student_profile = self.profile.data
             return existing
-
-        agent = commons.get_agent(university_id)
-        if not agent:
-            return None
 
         try:
             console.print(
@@ -346,11 +346,8 @@ Use short paragraphs.
                 "Generating it now...[/yellow]"
             )
 
-            assessment = agent.assess_fit(self.profile.data)
-            self.profile.add_assessment(university_id, assessment)
-            self.profile.generate_summary()
-
-            self.student_profile = self.profile.data
+            assessment = commons.generate_fit_assessment(self.canonical_student_id, university_id)
+            assessments[university_id] = assessment
 
             console.print(
                 f"[green]Fit assessment generated and saved for {university_id}.[/green]"
@@ -362,20 +359,83 @@ Use short paragraphs.
             console.print(f"[dim]{exc}[/dim]")
             return None
 
+    def _is_broad_fit_question(self, lower_msg: str) -> bool:
+        """Return True for a fit/comparison question that doesn't name one
+        specific university -- e.g. 'which universities fit my profile?'."""
+        broad_keywords = [
+            "which universit", "where do i fit", "best fit for me",
+            "university recommendation", "which school", "compare universities",
+            "what are my options", "which program fits", "where should i apply",
+        ]
+        return any(keyword in lower_msg for keyword in broad_keywords)
+
+    def _broad_fit_response(self, user_message: str) -> Optional[str]:
+        """Fan out to every university agent in the background, generating
+        or reusing each fit assessment, then synthesise one comparison
+        answer. The student never sees the individual university agents."""
+        university_ids = commons.list_university_ids()
+        assessments = self.student_profile.setdefault("assessments", {})
+        summary_lines = []
+
+        for university_id in university_ids:
+            assessment = assessments.get(university_id)
+            if not assessment:
+                try:
+                    assessment = commons.generate_fit_assessment(self.canonical_student_id, university_id)
+                    assessments[university_id] = assessment
+                except Exception as exc:
+                    console.print(f"[yellow]Fit assessment failed for {university_id}: {exc}[/yellow]")
+                    continue
+
+            summary_lines.append(
+                f"- {assessment.get('university', university_id)}: "
+                f"{assessment.get('match_tier', 'unknown')} fit "
+                f"(score {assessment.get('match_score', 'n/a')}) -- {assessment.get('fit_summary', '')}"
+            )
+
+        if not summary_lines:
+            return None
+
+        prompt = (
+            "You are the student's personal advising agent. You just checked in the "
+            "background with every university program's agent and got back these fit "
+            "assessments. Give the student one clear, personalised answer comparing "
+            "their options -- be direct about which look strongest and why. Do not "
+            "mention that you 'queried agents'; speak as the one advisor who checked.\n\n"
+            + "\n".join(summary_lines)
+            + f"\n\nSTUDENT QUESTION:\n{user_message}"
+        )
+
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=800,
+                system=self._runtime_system_prompt(),
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text
+        except Exception as exc:
+            console.print(f"[yellow]Broad fit synthesis failed: {exc}[/yellow]")
+            return "\n".join(summary_lines)
+
     def _saved_assessment_response(self, user_message: str) -> Optional[str]:
         """Answer simple questions from stored fit assessments without another LLM call."""
         lower_msg = user_message.lower()
         assessments = self.student_profile.get("assessments", {}) or {}
 
+        # A broad "which university fits me" question (no university named)
+        # must always go to the multi-university fan-out in chat(), never to
+        # a single cached assessment picked just because it's the only one
+        # that happens to exist yet.
+        if self._is_broad_fit_question(lower_msg) and not commons.match_university_ids(user_message):
+            return None
+
         university_map = {
-            "wright_state_cs": {
-                "keywords": ["wright", "wright state", "raider"],
-                "display": "Wright State",
-            },
-            "franklin_cs": {
-                "keywords": ["franklin", "franklin university"],
-                "display": "Franklin University",
-            },
+            university_id: {
+                "keywords": persona.get("keywords", []),
+                "display": persona.get("name", university_id),
+            }
+            for university_id, persona in UNIVERSITY_PERSONAS.items()
         }
 
         selected_id = None
@@ -388,9 +448,24 @@ Use short paragraphs.
                 break
 
         if selected_id is None:
-            # If the user asks a generic match question and only one assessment exists,
-            # use that. Otherwise let Aria answer normally.
-            if len(assessments) == 1:
+            # Only fall back to "the one assessment that exists" for messages
+            # that are unambiguously asking for a university verdict, not
+            # generic profile words. "strength"/"gap"/"fit"/"profile" alone
+            # are deliberately excluded here -- they're just as likely to be
+            # general profile questions ("what are my strengths and
+            # weaknesses?") as university-fit ones, and when no university is
+            # named there's no way to tell which the student meant. Those
+            # general-sounding questions now correctly fall through to
+            # _student_profile_response / the general LLM call instead of
+            # being answered from one arbitrarily-cached university verdict.
+            decisive_fit_keywords = [
+                "match score", "match tier", "think about me", "think about my profile",
+                "recommendation", "should i apply", "should i choose",
+                "am i suitable", "am i eligible", "chances", "chance",
+            ]
+            is_fit_ish = any(keyword in lower_msg for keyword in decisive_fit_keywords)
+
+            if len(assessments) == 1 and is_fit_ish:
                 selected_id = next(iter(assessments.keys()))
                 selected_meta = university_map.get(selected_id, {"display": selected_id})
             else:
@@ -960,49 +1035,21 @@ Student message:
             return {}
 
     def _direct_university_answer_if_needed(self, user_message: str) -> Optional[str]:
-        """Ask the relevant university agent directly for obvious university questions."""
-        lower_msg = user_message.lower()
+        """Ask the relevant university agent(s) in the background for obvious
+        university questions, using the persona-defined keyword lists
+        (agents.commons.match_university_ids) as the single source of truth
+        instead of a hardcoded per-university keyword list here."""
+        matched_ids = commons.match_university_ids(user_message)
 
-        wright_keywords = [
-            "wright state",
-            "wright",
-            "raider",
-            "ms computer science",
-            "ms cs",
-            "computer science",
-            "fall 2026",
-            "fall 2027",
-            "indian students",
-            "admitted",
-            "admission numbers",
-            "minimum gpa",
-            "assistantship",
-            "funding",
-            "deadline",
-            "faculty",
-            "professor",
-            "research lab",
-            "tuition",
-            "scholarship",
-        ]
-
-        franklin_keywords = [
-            "franklin",
-            "franklin university",
-        ]
-
-        university_id = None
-        agent_label = None
-
-        if any(keyword in lower_msg for keyword in franklin_keywords):
-            university_id = "franklin_cs"
-            agent_label = "Franklin"
-        elif any(keyword in lower_msg for keyword in wright_keywords):
-            university_id = "wright_state_cs"
-            agent_label = "Raider"
-
-        if university_id is None:
+        if not matched_ids:
             return None
+
+        if len(matched_ids) > 1:
+            responses = commons.query_all(user_message, self.student_profile, university_ids=matched_ids)
+            return commons.synthesise(user_message, responses, self.student_profile)
+
+        university_id = matched_ids[0]
+        agent_label = UNIVERSITY_PERSONAS.get(university_id, {}).get("agent_name", university_id)
 
         result = commons.query(
             university_id,
@@ -1037,32 +1084,27 @@ Student message:
             "i'll check",
             "i will check",
             "consulting the",
-            "wright state agent",
             "university agent",
             "commons agent",
-            "franklin agent",
-            "franklin university",
-            "franklin",
-            "wright state",
-            "raider"
         ]
-        return any(trigger in message.lower() for trigger in triggers)
+        if any(trigger in message.lower() for trigger in triggers):
+            return True
+        return bool(commons.match_university_ids(message))
 
     def _enrich_with_university_knowledge(
         self,
         aria_response: str,
         user_message: str
     ) -> str:
-        combined_text = f"{user_message}\n{aria_response}".lower()
+        combined_text = f"{user_message}\n{aria_response}"
+        matched_ids = commons.match_university_ids(combined_text)
 
-        if "franklin" in combined_text:
-            university_id = "franklin_cs"
-            agent_label = "Franklin University (Franklin)"
-        elif "wright state" in combined_text or "raider" in combined_text:
-            university_id = "wright_state_cs"
-            agent_label = "Wright State (Raider)"
-        else:
+        if not matched_ids:
             return aria_response
+
+        university_id = matched_ids[0]
+        persona = UNIVERSITY_PERSONAS.get(university_id, {})
+        agent_label = f"{persona.get('name', university_id)} ({persona.get('agent_name', university_id)})"
 
         result = commons.query(
             university_id,
@@ -1129,6 +1171,158 @@ Important style rules:
         return enriched.content[0].text
 
     # ------------------------------------------------------------------
+    # Verification (chat-only -- no direct student-facing verification
+    # action endpoint; the student's personal agent triggers reanalysis
+    # and records confirm/ignore/clarify decisions via agents.commons)
+    # ------------------------------------------------------------------
+    def _resolve_pending_verification_reply(self, action: str, note: str = "") -> Optional[str]:
+        """Record the student's confirm/ignore/clarify decision -- action is
+        decided by _classify_intent, not by re-deriving it from keywords."""
+        item_id = self._pending_verification_item_id
+
+        try:
+            result = commons.resolve_verification_item(
+                student_id=self.canonical_student_id,
+                item_id=item_id,
+                action=action,
+                note=note,
+            )
+        except Exception as exc:
+            console.print(f"[yellow]Could not resolve verification item {item_id}: {exc}[/yellow]")
+            self._pending_verification_item_id = None
+            return None
+
+        self._pending_verification_item_id = None
+
+        open_items = [item for item in result["check"].get("items", []) if not item.get("is_resolved")]
+
+        if open_items:
+            next_item = open_items[0]
+            self._pending_verification_item_id = next_item["id"]
+            return (
+                "Got it, thanks. One more thing worth checking: "
+                f"{next_item.get('message')}\n\n"
+                f"Expected: {next_item.get('expected_value') or 'not specified'}\n"
+                f"Found: {next_item.get('found_value') or 'not specified'}\n\n"
+                "Is this correct, should I ignore it, or would you like to clarify?"
+            )
+
+        return "Thanks -- that covers everything. Your profile is fully reviewed for now."
+
+    def _run_verification_check(self) -> Optional[str]:
+        """Trigger a fresh background verification pass and surface the
+        first open item, if any. Called only when _classify_intent decided
+        this is what the student wants -- no keyword trigger list."""
+        try:
+            result = commons.run_verification(self.canonical_student_id)
+        except Exception as exc:
+            console.print(f"[yellow]Verification check failed: {exc}[/yellow]")
+            return None
+
+        open_items = [item for item in result.get("items", []) if not item.get("is_resolved")]
+
+        if not open_items:
+            return (
+                "I checked your profile across your resume, GitHub, and LinkedIn -- "
+                "everything lines up, no mismatches to review right now."
+            )
+
+        item = open_items[0]
+        self._pending_verification_item_id = item["id"]
+
+        return (
+            f"I found something worth a second look: {item.get('message')}\n\n"
+            f"Expected: {item.get('expected_value') or 'not specified'}\n"
+            f"Found: {item.get('found_value') or 'not specified'}\n\n"
+            "Is this correct, should I ignore it, or would you like to clarify what's going on?"
+        )
+
+    # ------------------------------------------------------------------
+    # Intent classification -- the single reasoning step that decides what
+    # a message is actually asking for. Replaces the old fixed-priority
+    # keyword chain, where two intents sharing a word (e.g. "profile" or
+    # "fit" appearing in both a university-fit question and a generic
+    # profile question) could silently misroute to the wrong handler.
+    # ------------------------------------------------------------------
+    INTENT_CATEGORIES = [
+        "verification_reply",
+        "verification_check",
+        "university_fit_single",
+        "university_fit_broad",
+        "university_qa",
+        "github_analysis",
+        "profile_analysis",
+        "comparison",
+        "admission_probability",
+        "general",
+    ]
+
+    def _classify_intent(self, user_message: str) -> Dict[str, Any]:
+        """Ask the model what this message is actually asking for. Falls
+        back to {"intent": "general"} on any failure (parse error, API
+        error) so the agent still answers via the general LLM call instead
+        of breaking the turn."""
+        pending_context = ""
+        if self._pending_verification_item_id is not None:
+            pending_context = """
+There is a verification item awaiting the student's reply from the previous
+turn (a flagged profile mismatch you asked them to confirm/ignore/clarify).
+If this message is answering that, use intent "verification_reply" and set
+verification_reply_action to "confirm", "ignore", or "clarify". If this
+message is clearly a new, unrelated request instead, classify it normally
+and leave verification_reply_action null -- the pending item stays open and
+will be re-surfaced later.
+"""
+
+        classification_prompt = f"""Classify what the student is asking for in this message.
+Return ONLY valid JSON, no markdown, in exactly this shape:
+{{"intent": "<one of: {', '.join(self.INTENT_CATEGORIES)}>", "verification_reply_action": "confirm" or "ignore" or "clarify" or null}}
+
+Categories:
+- verification_reply: replying to a flagged profile mismatch (see context below)
+- verification_check: wants their profile checked for mismatches/inconsistencies across resume, GitHub, LinkedIn, profile
+- university_fit_single: asks about their personal fit, chances, or match score at ONE specific named university
+- university_fit_broad: asks which university fits them best, without naming a specific one
+- university_qa: a factual question about a specific university (deadlines, GPA minimums, tuition, requirements), not a personal-fit judgment
+- github_analysis: shares a GitHub link/username, or explicitly asks to analyze their GitHub profile
+- profile_analysis: asks about their own profile, strengths, weaknesses, gaps, or overall score, with no specific university involved
+- comparison: asks to compare universities generically
+- admission_probability: asks generic admission chances/probability, not tied to their stored fit assessments
+- general: anything else -- greetings, open-ended advice, follow-up conversation
+{pending_context}
+STUDENT MESSAGE:
+{user_message}
+"""
+
+        try:
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=150,
+                system="Return only valid JSON. No markdown, no explanation, no extra text.",
+                messages=[{"role": "user", "content": classification_prompt}],
+            )
+
+            raw = response.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.replace("```json", "").replace("```", "").strip()
+
+            data = json.loads(raw)
+
+            intent = str(data.get("intent", "general")).strip()
+            if intent not in self.INTENT_CATEGORIES:
+                intent = "general"
+
+            action = data.get("verification_reply_action")
+            if action not in {"confirm", "ignore", "clarify"}:
+                action = None
+
+            return {"intent": intent, "verification_reply_action": action}
+
+        except Exception as exc:
+            console.print(f"[yellow]Intent classification failed, defaulting to general: {exc}[/yellow]")
+            return {"intent": "general", "verification_reply_action": None}
+
+    # ------------------------------------------------------------------
     # Main chat function
     # ------------------------------------------------------------------
     def _finalize_response(self, user_message: str, aria_response: str) -> str:
@@ -1159,7 +1353,10 @@ Important style rules:
 
         lower_msg = user_message.lower()
 
-        # Roadmap progress/status check.
+        # Roadmap progress/status check -- cheap and unambiguous, checked
+        # before intent classification (no reason to spend a model call
+        # deciding something a plain keyword-on-existing-roadmap check
+        # already answers correctly).
         roadmap = self.student_profile.get("roadmap")
         if roadmap and "progress" in lower_msg:
             response = (
@@ -1188,61 +1385,90 @@ Important style rules:
 
             return self._finalize_response(user_message, response_text)
 
-        # Automatically update the persistent student profile when the user shares
-        # clear profile information.
-        if (
-            self.profile is not None
-            and hasattr(self.profile, "update_profile")
-            and self._should_extract_profile_information(user_message)
-        ):
+        # Automatically update the persistent student profile when the
+        # student shares clear profile information in chat. Operates on
+        # self.student_profile directly (the dict the view actually
+        # persists) -- previously this was gated on the legacy self.profile
+        # object, which is always None on the Django path, making this
+        # entire block a silent no-op (profile facts shared mid-chat were
+        # never actually saved).
+        if self._should_extract_profile_information(user_message):
             extracted = self._extract_profile_information(user_message)
 
             if extracted:
-                old_score = self.profile.data.get("overall_profile_score", 0)
-                updated_fields = self.profile.update_profile(extracted) or []
+                updated_fields = [
+                    field for field, value in extracted.items()
+                    if self.student_profile.get(field) != value
+                ]
+                self.student_profile.update(extracted)
 
                 if updated_fields:
-                    if hasattr(self.profile, "build_ai_profile"):
-                        self.profile.build_ai_profile()
-
-                    self.student_profile = self.profile.data
-                    new_score = self.profile.data.get("overall_profile_score", 0)
-
-                    console.print("\n[bold green]🧠 AI profile updated[/bold green]")
+                    console.print("\n[bold green]Profile updated from chat[/bold green]")
                     for field in updated_fields:
-                        console.print(f"[green]✓ Updated:[/green] {field.replace('_', ' ').title()}")
+                        console.print(f"[green]-[/green] {field.replace('_', ' ').title()}")
 
-                    if new_score != old_score:
-                        console.print(f"[green]Overall Score:[/green] {old_score} → {new_score}")
+        # Single reasoning step: decide what this message is actually
+        # asking for, instead of matching it against every handler's
+        # keyword list in a fixed priority order (that ordering is what
+        # previously let "profile"/"fit" appearing in unrelated questions
+        # silently misroute to the wrong handler).
+        classification = self._classify_intent(user_message)
+        intent = classification["intent"]
 
-        saved_assessment = self._saved_assessment_response(user_message)
-        if saved_assessment:
-            return self._finalize_response(user_message, saved_assessment)
+        if intent == "verification_reply" and self._pending_verification_item_id is not None:
+            action = classification.get("verification_reply_action")
+            if action:
+                resolved = self._resolve_pending_verification_reply(action)
+                if resolved is not None:
+                    return self._finalize_response(user_message, resolved)
 
-        profile_response = self._student_profile_response(user_message)
-        if profile_response:
-            return self._finalize_response(user_message, profile_response)
+        elif intent == "verification_check":
+            verification_response = self._run_verification_check()
+            if verification_response:
+                return self._finalize_response(user_message, verification_response)
 
-        if "probability" in lower_msg or "chance" in lower_msg:
-            return self._finalize_response(
-                user_message,
-                self.admission_probability()
-            )
+        elif intent == "university_fit_single":
+            saved_assessment = self._saved_assessment_response(user_message)
+            if saved_assessment:
+                return self._finalize_response(user_message, saved_assessment)
+            # Named university but no cached-answer shortcut matched (e.g. a
+            # freeform fit phrasing) -- ask that university agent directly
+            # rather than falling straight to a generic answer.
+            university_direct_answer = self._direct_university_answer_if_needed(user_message)
+            if university_direct_answer:
+                return self._finalize_response(user_message, university_direct_answer)
 
-        if "compare" in lower_msg or "cmu vs wright" in lower_msg:
-            return self._finalize_response(
-                user_message,
-                self.university_comparison()
-            )
+        elif intent == "university_fit_broad":
+            broad_fit_response = self._broad_fit_response(user_message)
+            if broad_fit_response:
+                return self._finalize_response(user_message, broad_fit_response)
 
-        github_response = self._handle_github_profile_analysis(user_message)
-        if github_response:
-            return self._finalize_response(user_message, github_response)
+        elif intent == "university_qa":
+            university_direct_answer = self._direct_university_answer_if_needed(user_message)
+            if university_direct_answer:
+                return self._finalize_response(user_message, university_direct_answer)
 
-        university_direct_answer = self._direct_university_answer_if_needed(user_message)
-        if university_direct_answer:
-            return self._finalize_response(user_message, university_direct_answer)
+        elif intent == "github_analysis":
+            github_response = self._handle_github_profile_analysis(user_message)
+            if github_response:
+                return self._finalize_response(user_message, github_response)
 
+        elif intent == "profile_analysis":
+            profile_response = self._student_profile_response(user_message)
+            if profile_response:
+                return self._finalize_response(user_message, profile_response)
+            # No exact template matched (e.g. "how's my profile?") -- falls
+            # through to the general call below, which already carries the
+            # full profile in its system prompt and can answer naturally.
+
+        elif intent == "admission_probability":
+            return self._finalize_response(user_message, self.admission_probability())
+
+        elif intent == "comparison":
+            return self._finalize_response(user_message, self.university_comparison())
+
+        # "general", or a more specific intent whose handler didn't produce
+        # a response -- fall back to the model with full context.
         try:
             response = client.messages.create(
                 model="claude-haiku-4-5-20251001",
@@ -1272,12 +1498,15 @@ Important style rules:
     # Terminal loop
     # ------------------------------------------------------------------
     def run_interactive(self):
+        university_lines = "\n".join(
+            f"  • {persona.get('agent_name', uid)} ({persona.get('name', uid)})"
+            for uid, persona in UNIVERSITY_PERSONAS.items()
+        )
         console.print(Panel(
-            f"[bold]Aria[/bold] is ready.\n"
+            f"[bold]{self.agent_name}[/bold] is ready.\n"
             f"Advising: [cyan]{self.student_name}[/cyan]\n"
-            f"University agents available in the Korgut Commons:\n"
-            f"  • Raider (Wright State University CS)\n"
-            f"  • Franklin (Franklin University MSCS, if registered)\n\n"
+            f"University agents available in the Korgut Commons (background only):\n"
+            f"{university_lines}\n\n"
             f"[dim]Commands:\n"
             f"  • quit / exit / bye - exit and auto-export report\n"
             f"  • status - see Commons status\n"
@@ -1354,5 +1583,5 @@ Important style rules:
 
             response = self.chat(user_input)
 
-            console.print("\n[bold green]Aria:[/bold green]")
+            console.print(f"\n[bold green]{self.agent_name}:[/bold green]")
             console.print(Markdown(response or "No response generated."))

@@ -20,6 +20,12 @@ class VerificationStatusAPIView(APIView):
     GET /api/verification/status/
     Full verification state, including every item (open and resolved).
     Always recomputed live -- safe to poll after any reupload.
+
+    Triggering a fresh check and acting on flagged items (confirm/ignore/
+    clarify) is chat-only now -- the student's personal agent runs
+    verification and records decisions via agents.commons; this endpoint
+    (and VerificationItemListAPIView below) exist only so a "past
+    mismatches" screen can read that history directly.
     """
 
     permission_classes = STUDENT_PERMISSIONS
@@ -29,27 +35,13 @@ class VerificationStatusAPIView(APIView):
         return Response(services.run_verification(student_id, user=request.user), status=status.HTTP_200_OK)
 
 
-class VerificationReanalyzeAPIView(APIView):
-    """
-    POST /api/verification/reanalyze/
-    Identical result to GET /status/ -- exposed as its own POST action so
-    the frontend has a natural "Reanalyze" button to call after a student
-    edits their profile or reuploads a resume/GitHub/LinkedIn source.
-    """
-
-    permission_classes = STUDENT_PERMISSIONS
-
-    def post(self, request):
-        student_id = request.user.account.student_id
-        return Response(services.run_verification(student_id, user=request.user), status=status.HTTP_200_OK)
-
-
 class VerificationItemListAPIView(APIView):
     """
     GET /api/verification/items/?status=<filter> (default: open)
     The "verification pending list" -- one row per flagged disagreement.
-    Does not trigger a reanalysis; call /reanalyze/ first if the data might
-    be stale.
+    Read-only history; does not trigger a reanalysis and cannot resolve an
+    item -- both of those happen only through chat with the student's
+    personal agent.
 
     `status` accepts either a broad bucket (`open`, `resolved`, `all`) or
     one specific outcome (`confirmed`, `ignored`, `clarified`,
@@ -79,37 +71,3 @@ class VerificationItemListAPIView(APIView):
             },
             status=status.HTTP_200_OK,
         )
-
-
-class VerificationItemDecisionAPIView(APIView):
-    """
-    POST /api/verification/items/<item_id>/decision/
-    Body: {"action": "confirm" | "ignore" | "clarify", "note": "..."}
-    Resolves exactly one flagged item. `note` is required for "clarify"
-    (optional free text otherwise). Once resolved, an item is immutable --
-    calling this again on the same item returns 400.
-    """
-
-    permission_classes = STUDENT_PERMISSIONS
-    VALID_ACTIONS = {"confirm", "ignore", "clarify"}
-
-    def post(self, request, item_id):
-        student_id = request.user.account.student_id
-        action = str(request.data.get("action", "")).strip().lower()
-        note = str(request.data.get("note", "") or "").strip()
-
-        if action not in self.VALID_ACTIONS:
-            return _api_error(f"action must be one of {sorted(self.VALID_ACTIONS)}.")
-        if action == "clarify" and not note:
-            return _api_error("note is required when action is 'clarify'.")
-
-        try:
-            result = services.resolve_item(student_id=student_id, item_id=item_id, action=action, note=note)
-        except services.ItemNotFound:
-            return _api_error("Verification item not found.", status.HTTP_404_NOT_FOUND)
-        except services.ItemNotOwned:
-            return _api_error("You may only resolve your own verification items.", status.HTTP_403_FORBIDDEN)
-        except services.ItemAlreadyResolved:
-            return _api_error("This item has already been resolved.")
-
-        return Response(result, status=status.HTTP_200_OK)

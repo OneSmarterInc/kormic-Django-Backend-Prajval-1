@@ -7,19 +7,19 @@ from django.test import TestCase
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from django_api import views as django_api_views
+from agents import commons as agents_commons
 from django_api.models import FitAssessment, ResumeUpload, StudentProfile
 from django_api.services import make_student_id
 
 
 def _reset_inprocess_agent_caches():
-    # ARIA_SESSIONS / UNIVERSITY_AGENTS / PROFILE_PRESENTERS are plain
-    # module-level dicts that persist across TestCase classes within the
-    # same test process -- clear them so a mocked agent from one test
-    # doesn't leak into another via the get_*_agent() cache lookup.
-    django_api_views.ARIA_SESSIONS.clear()
-    django_api_views.UNIVERSITY_AGENTS.clear()
-    django_api_views.PROFILE_PRESENTERS.clear()
+    # agents.commons keeps plain module-level dict caches (_student_agents /
+    # _university_agents / _profile_presenters) that persist across TestCase
+    # classes within the same test process -- clear them so a mocked agent
+    # from one test doesn't leak into another via the get_*_agent() cache lookup.
+    agents_commons._student_agents.clear()
+    agents_commons._university_agents.clear()
+    agents_commons._profile_presenters.clear()
 
 
 def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):
@@ -132,38 +132,20 @@ class ChatHistoryTests(TestCase):
         self.student.post("/api/profile/", {"name": "Carol"}, format="json")
 
     @mock.patch("agents.student_agent.StudentAgent")
-    def test_aria_chat_persists_and_returns_history(self, MockStudentAgent):
+    def test_agent_chat_persists_and_returns_history(self, MockStudentAgent):
         instance = MockStudentAgent.return_value
+        instance.agent_name = "Nova"
         instance.chat.side_effect = ["Hi there!", "Sure, here's more info."]
         instance.student_profile = {"student_id": self.student_id}
 
-        self.student.post("/api/chat/aria/", {"message": "Hello"}, format="json")
-        self.student.post("/api/chat/aria/", {"message": "Tell me more"}, format="json")
+        self.student.post("/api/chat/agent/", {"message": "Hello"}, format="json")
+        self.student.post("/api/chat/agent/", {"message": "Tell me more"}, format="json")
 
-        history = self.student.get("/api/chat/aria/history/")
+        history = self.student.get("/api/chat/agent/history/")
         self.assertEqual(history.status_code, status.HTTP_200_OK)
         self.assertEqual(history.data["count"], 4)
         senders = [m["sender"] for m in history.data["messages"]]
         self.assertEqual(senders, ["user", "assistant", "user", "assistant"])
-
-    @mock.patch("agents.university_agent.UniversityAgent")
-    def test_university_chat_history_scoped_per_university(self, MockUniversityAgent):
-        instance = MockUniversityAgent.return_value
-        instance.answer.return_value = {
-            "agent_name": "Raider",
-            "university": "Wright State",
-            "answer": "The min GPA is 3.0.",
-            "pending": False,
-            "confidence": 0.9,
-        }
-
-        self.student.post("/api/chat/university/wright_state_cs/", {"message": "GPA requirement?"}, format="json")
-
-        wsu_history = self.student.get("/api/chat/university/wright_state_cs/history/")
-        self.assertEqual(wsu_history.data["count"], 2)
-
-        franklin_history = self.student.get("/api/chat/university/franklin_cs/history/")
-        self.assertEqual(franklin_history.data["count"], 0)
 
 
 class SubResourceHistoryTests(TestCase):
@@ -291,13 +273,18 @@ class SubResourceHistoryTests(TestCase):
         resp = self.student.post("/api/profile/image/", {"image": not_an_image}, format="multipart")
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    @mock.patch("agents.university_agent.UniversityAgent")
-    def test_fit_assessment_history_dual_mode_visibility(self, MockUniversityAgent):
-        instance = MockUniversityAgent.return_value
-        instance.assess_fit.return_value = {"match_tier": "target", "match_score": 70}
-
-        self.student.post("/api/assessments/generate/wright_state_cs/")
-        self.student.post("/api/assessments/generate/franklin_cs/")
+    def test_fit_assessment_history_dual_mode_visibility(self):
+        # Fit assessments are only ever produced by the student's personal
+        # agent via agents.commons.generate_fit_assessment (chat-triggered,
+        # no direct student-facing POST endpoint anymore) -- create the rows
+        # directly here to test the read-only history/detail views.
+        student = StudentProfile.objects.get(student_id=self.student_id)
+        FitAssessment.objects.create(
+            student=student, university_id="wright_state_cs", assessment={"match_tier": "target", "match_score": 70}
+        )
+        FitAssessment.objects.create(
+            student=student, university_id="franklin_cs", assessment={"match_tier": "target", "match_score": 70}
+        )
 
         student_view = self.student.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(student_view.data["count"], 2)
