@@ -46,25 +46,37 @@ class VerificationReanalyzeAPIView(APIView):
 
 class VerificationItemListAPIView(APIView):
     """
-    GET /api/verification/items/?status=open|resolved|all (default: open)
+    GET /api/verification/items/?status=<filter> (default: open)
     The "verification pending list" -- one row per flagged disagreement.
     Does not trigger a reanalysis; call /reanalyze/ first if the data might
     be stale.
+
+    `status` accepts either a broad bucket (`open`, `resolved`, `all`) or
+    one specific outcome (`confirmed`, `ignored`, `clarified`,
+    `auto_cleared`, `superseded`) so a "history" screen can filter down to
+    exactly one kind of resolution. `summary` in the response always has
+    counts for every outcome, regardless of which filter was requested, so
+    a single call can drive both the filtered list and a tab/count row.
     """
 
     permission_classes = STUDENT_PERMISSIONS
-    VALID_FILTERS = {"open", "resolved", "all"}
 
     def get(self, request):
         student_id = request.user.account.student_id
         filter_status = str(request.query_params.get("status", "open")).strip().lower()
 
-        if filter_status not in self.VALID_FILTERS:
-            return _api_error(f"status must be one of {sorted(self.VALID_FILTERS)}.")
+        if filter_status not in services.VALID_ITEM_FILTERS:
+            return _api_error(f"status must be one of {sorted(services.VALID_ITEM_FILTERS)}.")
 
-        items = services.list_items(student_id, filter_status)
+        result = services.list_items(student_id, filter_status)
         return Response(
-            {"student_id": student_id, "status_filter": filter_status, "count": len(items), "items": items},
+            {
+                "student_id": student_id,
+                "status_filter": filter_status,
+                "count": len(result["items"]),
+                "items": result["items"],
+                "summary": result["summary"],
+            },
             status=status.HTTP_200_OK,
         )
 

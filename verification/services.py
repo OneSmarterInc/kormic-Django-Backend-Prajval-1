@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, List
 
 from django.utils import timezone
@@ -7,7 +9,7 @@ from django.utils import timezone
 from django_api.models import GitHubAnalysis, LinkedInAnalysis, ResumeUpload, StudentProfile
 from verification.ai_agent import AIVerificationAgent
 from verification.models import VerificationCheck, VerificationItem
-from verification.verification_agent import VerificationAgent, VerificationCandidate
+from verification.verification_agent import ALL_SOURCES, VerificationAgent, VerificationCandidate
 
 NEXT_STEPS = {
     "profile": "POST /api/profile/",
@@ -47,6 +49,22 @@ class ItemNotOwned(Exception):
 
 class ItemAlreadyResolved(Exception):
     pass
+
+
+def _hash_source_data(data: Dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(data or {}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _compute_source_hashes(resume_data: Dict, github_data: Dict, linkedin_data: Dict) -> Dict[str, str]:
+    return {
+        "resume": _hash_source_data(resume_data),
+        "github": _hash_source_data(github_data),
+        "linkedin": _hash_source_data(linkedin_data),
+    }
+
+
+def _signature_for(sources: List[str], source_hashes: Dict[str, str]) -> Dict[str, str]:
+    return {s: source_hashes.get(s, "") for s in sources if s in ALL_SOURCES}
 
 
 def _resolve_github_verified_email(student_id: str) -> str:
@@ -120,22 +138,35 @@ def _run_engine(
         return result
 
 
-def _reconcile_items(check: VerificationCheck, candidates: List[VerificationCandidate]) -> None:
+def _reconcile_items(
+    check: VerificationCheck,
+    candidates: List[VerificationCandidate],
+    source_hashes: Dict[str, str],
+) -> None:
     """
     Diffs a fresh analysis against the check's existing item history so a
-    student's past decisions survive reanalysis:
+    student's past decisions survive reanalysis. Whether "the evidence
+    changed" is decided by comparing `source_signature` -- a hash of the
+    actual structured resume/GitHub/LinkedIn data -- NOT by comparing the
+    AI's free-text `found_value` between calls. The model isn't guaranteed
+    to phrase the same underlying fact identically across separate
+    analyses (e.g. "IIT Bombay" vs "LinkedIn shows IIT Bombay"), so
+    comparing prose treated an unchanged item as "changed" on almost every
+    reanalysis and kept re-raising resolved/ignored/confirmed items. Hashing
+    the deterministic source data the item was actually raised from is
+    stable regardless of how the AI phrases things this time around.
 
     - An open item whose key no longer appears among the fresh candidates
       is auto-cleared (the disagreement resolved itself, e.g. the student
       fixed their profile name to match).
-    - An open item whose key is still flagged but the found value changed
-      (source was reuploaded with different data) is superseded, and a
-      fresh open item takes its place.
+    - An open item whose key is still flagged but its source_signature no
+      longer matches the current data (a genuine reupload) is superseded,
+      and a fresh open item takes its place.
     - A key with no open item, but whose most recent item was a genuine
-      student decision (confirm/ignore/clarify) against the *same* found
-      value, is left alone -- already answered, don't re-ask.
-    - Everything else (first time seeing this key, or the found value moved
-      on from what was last decided) gets a fresh open item.
+      student decision (confirmed/ignored/clarified) against the *same*
+      source_signature, is left alone -- already answered, don't re-ask.
+    - Everything else (first time seeing this key, or the evidence moved on
+      from what was last decided) gets a fresh open item.
     """
     fresh_by_key = {c.key: c for c in candidates}
     now = timezone.now()
@@ -150,7 +181,7 @@ def _reconcile_items(check: VerificationCheck, candidates: List[VerificationCand
             item.resolution = VerificationItem.Resolution.AUTO_CLEARED
             item.resolved_at = now
             item.save(update_fields=["is_resolved", "resolution", "resolved_at", "updated_at"])
-        elif candidate.found != item.found_value:
+        elif _signature_for(candidate.sources, source_hashes) != item.source_signature:
             item.is_resolved = True
             item.resolution = VerificationItem.Resolution.SUPERSEDED
             item.resolved_at = now
@@ -164,6 +195,7 @@ def _reconcile_items(check: VerificationCheck, candidates: List[VerificationCand
 
     for key, candidate in fresh_by_key.items():
         latest = latest_by_key.get(key)
+        fresh_signature = _signature_for(candidate.sources, source_hashes)
 
         if latest is not None and not latest.is_resolved:
             continue  # still open, unchanged -- untouched by the closure pass above
@@ -172,7 +204,7 @@ def _reconcile_items(check: VerificationCheck, candidates: List[VerificationCand
             latest is not None
             and latest.is_resolved
             and latest.resolution in STUDENT_DECISIONS
-            and latest.found_value == candidate.found
+            and latest.source_signature == fresh_signature
         ):
             continue  # student already decided this exact disagreement -- don't re-ask
 
@@ -186,6 +218,7 @@ def _reconcile_items(check: VerificationCheck, candidates: List[VerificationCand
             expected_value=candidate.expected,
             found_value=candidate.found,
             message=candidate.message,
+            source_signature=fresh_signature,
         )
 
 
@@ -221,15 +254,37 @@ def serialize_item(item: VerificationItem) -> Dict[str, Any]:
         "message": item.message,
         "is_resolved": item.is_resolved,
         "resolution": item.resolution or None,
+        "resolution_label": VerificationItem.Resolution(item.resolution).label if item.resolution else None,
         "student_note": item.student_note or "",
         "created_at": item.created_at,
         "resolved_at": item.resolved_at,
     }
 
 
+def _summarize_items(items: List[VerificationItem]) -> Dict[str, int]:
+    """Breakdown by exactly what happened to each item -- the four
+    student-facing outcomes (confirmed/ignored/clarified, plus still-open)
+    and the two system-driven ones (auto_cleared/superseded), so the
+    frontend can render a full history, not just an open/resolved binary."""
+    summary = {
+        "open": 0,
+        "confirmed": 0,
+        "ignored": 0,
+        "clarified": 0,
+        "auto_cleared": 0,
+        "superseded": 0,
+    }
+    for item in items:
+        if not item.is_resolved:
+            summary["open"] += 1
+        elif item.resolution in summary:
+            summary[item.resolution] += 1
+    return summary
+
+
 def serialize_check(check: VerificationCheck, include_items: bool = True) -> Dict[str, Any]:
-    items = list(check.items.all()) if include_items else []
-    open_count = sum(1 for i in items if not i.is_resolved) if include_items else check.items.filter(is_resolved=False).count()
+    items = list(check.items.all())
+    open_count = sum(1 for i in items if not i.is_resolved)
 
     payload: Dict[str, Any] = {
         "status": check.status,
@@ -238,6 +293,7 @@ def serialize_check(check: VerificationCheck, include_items: bool = True) -> Dic
         "student_id": check.student.student_id,
         "missing_sources": check.missing_sources,
         "pending_items_count": open_count,
+        "items_summary": _summarize_items(items),
         "engine": check.engine or None,
         "last_analyzed_at": check.last_analyzed_at,
         "next_steps": NEXT_STEPS,
@@ -289,13 +345,17 @@ def run_verification(student_id: str, user: Any = None) -> Dict[str, Any]:
             "work_months": profile.work_months,
         }
 
+        resume_data = latest_resume.extracted_data if latest_resume else {}
+        github_data = latest_github.result if latest_github else {}
+        linkedin_data = latest_linkedin.extracted if latest_linkedin else {}
+
         result = _run_engine(
             check=check,
             expected_name=expected_name,
             profile_facts=profile_facts,
-            resume_data=latest_resume.extracted_data if latest_resume else {},
-            github_data=latest_github.result if latest_github else {},
-            linkedin_data=latest_linkedin.extracted if latest_linkedin else {},
+            resume_data=resume_data,
+            github_data=github_data,
+            linkedin_data=linkedin_data,
             github_verified_email=_resolve_github_verified_email(student_id),
             sources_present={
                 "resume": latest_resume is not None,
@@ -304,7 +364,8 @@ def run_verification(student_id: str, user: Any = None) -> Dict[str, Any]:
             },
         )
 
-        _reconcile_items(check, result["candidates"])
+        source_hashes = _compute_source_hashes(resume_data, github_data, linkedin_data)
+        _reconcile_items(check, result["candidates"], source_hashes)
 
         check.missing_sources = result["missing_sources"]
         check.last_error = ""
@@ -323,22 +384,42 @@ def run_verification(student_id: str, user: Any = None) -> Dict[str, Any]:
     return serialize_check(check)
 
 
-def list_items(student_id: str, filter_status: str = "open") -> List[Dict[str, Any]]:
+VALID_ITEM_FILTERS = {
+    "open", "resolved", "all",
+    "confirmed", "ignored", "clarified", "auto_cleared", "superseded",
+}
+
+
+def list_items(student_id: str, filter_status: str = "open") -> Dict[str, Any]:
+    """
+    Returns every item plus a `summary` breakdown regardless of the filter,
+    so the frontend can show counts for all outcomes (open, confirmed,
+    ignored, clarified, plus the system-driven auto_cleared/superseded) in
+    one call instead of one request per status. `filter_status` only
+    controls which items populate the `items` list itself.
+    """
+    empty_summary = {"open": 0, "confirmed": 0, "ignored": 0, "clarified": 0, "auto_cleared": 0, "superseded": 0}
     profile = StudentProfile.objects.filter(student_id=student_id).first()
     if profile is None:
-        return []
+        return {"items": [], "summary": empty_summary}
 
     check = VerificationCheck.objects.filter(student=profile).first()
     if check is None:
-        return []
+        return {"items": [], "summary": empty_summary}
 
-    queryset = check.items.all()
+    all_items = list(check.items.all())
+    summary = _summarize_items(all_items)
+
     if filter_status == "open":
-        queryset = queryset.filter(is_resolved=False)
+        items = [i for i in all_items if not i.is_resolved]
     elif filter_status == "resolved":
-        queryset = queryset.filter(is_resolved=True)
+        items = [i for i in all_items if i.is_resolved]
+    elif filter_status == "all":
+        items = all_items
+    else:
+        items = [i for i in all_items if i.resolution == filter_status]
 
-    return [serialize_item(item) for item in queryset]
+    return {"items": [serialize_item(i) for i in items], "summary": summary}
 
 
 def resolve_item(*, student_id: str, item_id: int, action: str, note: str = "") -> Dict[str, Any]:

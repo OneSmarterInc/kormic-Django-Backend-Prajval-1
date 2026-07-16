@@ -80,6 +80,8 @@ class VerificationItem(models.Model):
     found_value = models.TextField(blank=True, default="")
     message = models.TextField()
 
+    source_signature = models.JSONField(default=dict, blank=True)
+
     is_resolved = models.BooleanField(default=False, db_index=True)
     resolution = models.CharField(max_length=20, choices=Resolution.choices, blank=True, default="")
     student_note = models.TextField(blank=True, default="")

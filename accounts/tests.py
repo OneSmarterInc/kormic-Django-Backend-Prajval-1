@@ -112,6 +112,49 @@ class AuthFlowTests(TestCase):
         device = TOTPDevice.objects.get(user__account__student_id=STUDENT_ID)
         self.assertIsNotNone(device.confirmed_at)
 
+    def test_double_enroll_call_returns_same_secret(self):
+        """
+        Regression test: TOTPEnrollView used to regenerate the secret on
+        every call, so a second call (a double-submitted form, a retried
+        request, a re-rendered enrollment screen) would silently invalidate
+        the QR the authenticator app already scanned from the first call --
+        every code it produced afterward would fail verification no matter
+        what the student entered. Calling enroll twice must be a no-op.
+        """
+        register(self.client)
+        access = login(self.client).data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        first = self.client.post("/api/auth/totp/enroll/")
+        second = self.client.post("/api/auth/totp/enroll/")
+        self.assertEqual(first.data["secret"], second.data["secret"])
+        self.assertEqual(TOTPDevice.objects.filter(user__account__student_id=STUDENT_ID).count(), 1)
+
+        # A code generated from the FIRST response's secret (the one the
+        # student's authenticator app actually scanned) must still verify.
+        code = pyotp.TOTP(first.data["secret"]).now()
+        verify_resp = self.client.post("/api/auth/totp/verify-enrollment/", {"code": code}, format="json")
+        self.assertEqual(verify_resp.status_code, status.HTTP_200_OK)
+
+    def test_verify_enrollment_tolerates_code_with_embedded_space(self):
+        """
+        Regression test: several authenticator apps display the 6-digit
+        code with a space in the middle ("123 456") for readability, and a
+        copy-paste can carry that space into the request. A bare .strip()
+        only removes leading/trailing whitespace, so code.isdigit() would
+        silently fail on the internal space and report "Invalid TOTP code"
+        for a code that was actually correct.
+        """
+        register(self.client)
+        access = login(self.client).data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        secret = self.client.post("/api/auth/totp/enroll/").data["secret"]
+
+        raw_code = pyotp.TOTP(secret).now()
+        spaced_code = f"{raw_code[:3]} {raw_code[3:]}"
+        resp = self.client.post("/api/auth/totp/verify-enrollment/", {"code": spaced_code}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+
     def test_same_access_token_now_passes_totp_gate_after_enrollment(self):
         register(self.client)
         access = login(self.client).data["access"]

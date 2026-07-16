@@ -47,6 +47,7 @@ from accounts.totp import (
     generate_backup_codes,
     generate_totp_secret,
     hash_backup_code,
+    normalize_code,
     verify_totp_code,
 )
 from verification.services import run_verification
@@ -205,6 +206,32 @@ class LoginView(APIView):
 
 
 class TOTPEnrollView(APIView):
+    """
+    Idempotent while enrollment is in progress, and race-safe under two
+    concurrent calls -- both matter, and only fixing one isn't enough:
+
+    A student's authenticator app has already scanned whatever secret this
+    endpoint returns, so a second call must return the exact same secret
+    (idempotent) or the QR just scanned becomes worthless. But a plain
+    "check if a device exists, else create one" is a TOCTOU race under two
+    near-simultaneous calls (a double-submitted form, a retried request --
+    exactly the scenario run_with_retry's own docstring calls out for this
+    same SQLite database): both requests can see "no device yet", both
+    generate a *different* candidate secret, and whichever write commits
+    second silently overwrites the first -- whose secret the frontend
+    already displayed and the user already scanned. Every code their app
+    produces afterward is then checked against a secret it never saw, and
+    verify-enrollment fails with "Invalid TOTP code" no matter what's
+    entered -- intermittently, only when two calls actually raced, which is
+    exactly the "works most of the time, randomly fails" symptom this fixes.
+
+    get_or_create() closes that race at the database level: it relies on
+    the OneToOneField(user) unique constraint, so if two requests really do
+    race, the loser's INSERT fails with IntegrityError and Django
+    transparently re-fetches the winner's row instead -- there is no window
+    where both requests can believe they created the device.
+    """
+
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -212,13 +239,15 @@ class TOTPEnrollView(APIView):
         if _user_has_confirmed_totp(user):
             return Response({"detail": "TOTP is already enrolled."}, status=status.HTTP_400_BAD_REQUEST)
 
-        secret = generate_totp_secret()
-        run_with_retry(
-            lambda: TOTPDevice.objects.update_or_create(user=user, defaults={"secret": secret, "confirmed_at": None})
+        candidate_secret = generate_totp_secret()
+        device, _created = run_with_retry(
+            lambda: TOTPDevice.objects.get_or_create(
+                user=user, defaults={"secret": candidate_secret, "confirmed_at": None}
+            )
         )
 
         return Response(
-            {"secret": secret, "provisioning_uri": build_provisioning_uri(secret, user.email)},
+            {"secret": device.secret, "provisioning_uri": build_provisioning_uri(device.secret, user.email)},
             status=status.HTTP_200_OK,
         )
 
@@ -229,7 +258,7 @@ class TOTPVerifyEnrollmentView(APIView):
     def post(self, request):
         serializer = EnrollVerifySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        code = serializer.validated_data["code"].strip()
+        code = normalize_code(serializer.validated_data["code"])
 
         try:
             device = request.user.totp_device
@@ -269,7 +298,7 @@ class TOTPLoginVerifyView(APIView):
         serializer = VerifyTOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         mfa_token = serializer.validated_data["mfa_token"].strip()
-        code = serializer.validated_data["code"].strip().upper()
+        code = normalize_code(serializer.validated_data["code"]).upper()
 
         user_id = get_user_id_from_mfa_token(mfa_token)
         if not user_id:

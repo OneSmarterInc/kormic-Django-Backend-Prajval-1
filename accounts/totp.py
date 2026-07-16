@@ -22,7 +22,13 @@ def build_provisioning_uri(secret: str, user_email: str) -> str:
     return pyotp.totp.TOTP(secret).provisioning_uri(name=user_email, issuer_name="Korgut Commons")
 
 
+def normalize_code(raw: str) -> str:
+    """Strips ALL whitespace, not just leading/trailing."""
+    return "".join(str(raw or "").split())
+
+
 def verify_totp_code(secret: str, code: str, *, user_id=None) -> bool:
+    code = normalize_code(code)
     if not code or not code.isdigit() or len(code) != 6:
         return False
 
