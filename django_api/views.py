@@ -744,13 +744,14 @@ class AgentNameAPIView(APIView):
 # ---------------------------------------------------------------------
 # API 7: Personal Agent Chat -- the student's single entry point.
 # Verification, GitHub/LinkedIn/resume interpretation, and university fit
-# checks all happen through this one endpoint; see agents/commons.py.
+# checks all happen through this one endpoint, via the LangGraph multi-agent
+# runtime in pure_multi_agent/.
 # ---------------------------------------------------------------------
 
 @api_view(["POST"])
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat(request):
-    from agents import commons
+    from pure_multi_agent.runtime import run_turn
 
     student_id = request.user.account.student_id
     message = request.data.get("message")
@@ -759,17 +760,14 @@ def agent_chat(request):
         return api_error("message is required.")
 
     try:
-        agent = commons.get_student_agent(student_id)
-        reply = agent.chat(message)
-        if hasattr(agent, "student_profile"):
-            save_profile_data(student_id, agent.student_profile)
+        agent_name, reply = run_turn(student_id, message)
         log_chat_turn(
             channel=ChatMessage.Channel.AGENT,
             student_id=student_id,
             user_message=message,
             assistant_message=reply or "",
         )
-        return Response({"agent": agent.agent_name, "student_id": student_id, "reply": reply})
+        return Response({"agent": agent_name, "student_id": student_id, "reply": reply})
     except Exception as exc:
         return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 

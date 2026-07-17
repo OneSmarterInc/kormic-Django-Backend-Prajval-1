@@ -162,10 +162,16 @@ def get_student_agent(student_id: str) -> Any:
 
 
 def drop_student_agent(student_id: str) -> None:
-    """Evict a cached personal agent, e.g. right after its agent_name changes."""
+    """Evict a cached personal agent, e.g. right after its agent_name changes.
+
+    Also evicts the LangGraph runtime's cached per-student context
+    (pure_multi_agent/runtime.py), which is what the chat API actually uses
+    now -- this keeps AgentNameAPIView's rename flow working unchanged."""
     from django_api.services import make_student_id
+    from pure_multi_agent.runtime import drop_student_context
 
     _student_agents.pop(make_student_id(student_id), None)
+    drop_student_context(student_id)
 
 
 def get_profile_presenter(university_id: str) -> Any:

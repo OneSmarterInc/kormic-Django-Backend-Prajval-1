@@ -17,9 +17,14 @@ def _reset_inprocess_agent_caches():
     # _university_agents / _profile_presenters) that persist across TestCase
     # classes within the same test process -- clear them so a mocked agent
     # from one test doesn't leak into another via the get_*_agent() cache lookup.
+    # pure_multi_agent.runtime keeps an analogous _student_contexts cache for
+    # the LangGraph chat path -- clear that too for the same reason.
+    from pure_multi_agent import runtime as pure_multi_agent_runtime
+
     agents_commons._student_agents.clear()
     agents_commons._university_agents.clear()
     agents_commons._profile_presenters.clear()
+    pure_multi_agent_runtime._student_contexts.clear()
 
 
 def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):
@@ -131,12 +136,12 @@ class ChatHistoryTests(TestCase):
         self.student, self.student_id = make_student_client(email="c@example.com")
         self.student.post("/api/profile/", {"name": "Carol"}, format="json")
 
-    @mock.patch("agents.student_agent.StudentAgent")
-    def test_agent_chat_persists_and_returns_history(self, MockStudentAgent):
-        instance = MockStudentAgent.return_value
-        instance.agent_name = "Nova"
-        instance.chat.side_effect = ["Hi there!", "Sure, here's more info."]
-        instance.student_profile = {"student_id": self.student_id}
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_agent_chat_persists_and_returns_history(self, mock_run_turn):
+        mock_run_turn.side_effect = [
+            ("Nova", "Hi there!"),
+            ("Nova", "Sure, here's more info."),
+        ]
 
         self.student.post("/api/chat/agent/", {"message": "Hello"}, format="json")
         self.student.post("/api/chat/agent/", {"message": "Tell me more"}, format="json")
