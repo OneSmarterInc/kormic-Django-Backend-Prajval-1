@@ -13,18 +13,15 @@ from django_api.services import make_student_id
 
 
 def _reset_inprocess_agent_caches():
-    # agents.commons keeps plain module-level dict caches (_student_agents /
-    # _university_agents / _profile_presenters) that persist across TestCase
-    # classes within the same test process -- clear them so a mocked agent
-    # from one test doesn't leak into another via the get_*_agent() cache lookup.
-    # pure_multi_agent.runtime keeps an analogous _student_contexts cache for
-    # the LangGraph chat path -- clear that too for the same reason.
-    from pure_multi_agent import runtime as pure_multi_agent_runtime
-
-    agents_commons._student_agents.clear()
+    # agents.commons keeps plain module-level dict caches (_university_agents /
+    # _profile_presenters) that persist across TestCase classes within the
+    # same test process -- clear them so a mocked agent from one test doesn't
+    # leak into another via the get_*_agent() cache lookup. There is no
+    # per-student context cache to clear on the pure_multi_agent chat path --
+    # it loads student_profile/memory/agent_name fresh from the database on
+    # every turn.
     agents_commons._university_agents.clear()
     agents_commons._profile_presenters.clear()
-    pure_multi_agent_runtime._student_contexts.clear()
 
 
 def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):

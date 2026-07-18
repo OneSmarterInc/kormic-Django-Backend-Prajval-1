@@ -3,17 +3,16 @@
 #
 # This is the single orchestration layer every backend agent (university
 # agents, verification, fit assessment) is reached through. The student
-# never talks to any of these agents directly -- only their personal
-# StudentAgent does, via the functions in this module. This module also
-# owns the lazy-build/in-process-cache lifecycle for every agent instance
-# (previously split across module-level dicts in django_api/views.py).
+# never talks to any of these agents directly -- only their personal agent
+# (the LangGraph runtime in pure_multi_agent/) does, via the functions in
+# this module, as tools. This module also owns the lazy-build/in-process
+# -cache lifecycle for every agent instance.
 
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
 
-import anthropic
 from rich.console import Console
 
 console = Console()
@@ -21,27 +20,11 @@ console = Console()
 # The Commons registry — all active university agents register here.
 _university_agents: Dict[str, Any] = {}
 
-# In-process caches for the other lazily-built, session-scoped agents.
+# In-process cache for the other lazily-built, session-scoped agents.
 # Rebuilt from persisted DB state on first use per worker process --
 # same lifecycle/caveats as _university_agents (not shared across workers,
 # not durable across restarts; only the underlying DB rows are durable).
-_student_agents: Dict[str, Any] = {}
 _profile_presenters: Dict[str, Any] = {}
-
-
-def _get_anthropic_client() -> anthropic.Anthropic:
-    """
-    Create Anthropic client only when synthesis is required.
-
-    This avoids failing during app startup if the synthesis layer is not used
-    immediately, while still requiring ANTHROPIC_API_KEY when synthesise() runs.
-    """
-    if not os.getenv("ANTHROPIC_API_KEY"):
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY not found. Add it to your .env file before using synthesis."
-        )
-
-    return anthropic.Anthropic()
 
 
 # ---------------------------------------------------------------------
@@ -83,30 +66,14 @@ def list_agents() -> List[str]:
     return list(_university_agents.keys())
 
 
-# University directory (single source of truth -- replaces the three
-# separately-hardcoded university id/keyword lists that used to live in
-# django_api/views.py's api_home and agents/student_agent.py)
+# University directory -- single source of truth for which university ids
+# exist, read directly from personas.university_personas.
 
 def list_university_ids() -> List[str]:
     """Every known university id, in persona-definition order."""
     from personas.university_personas import UNIVERSITY_PERSONAS
 
     return list(UNIVERSITY_PERSONAS.keys())
-
-
-def match_university_ids(text: str) -> List[str]:
-    """Return every university id whose configured keywords appear in text."""
-    from personas.university_personas import UNIVERSITY_PERSONAS
-
-    lower = (text or "").lower()
-    matched = []
-
-    for university_id, persona in UNIVERSITY_PERSONAS.items():
-        keywords = persona.get("keywords", [])
-        if any(keyword in lower for keyword in keywords):
-            matched.append(university_id)
-
-    return matched
 
 
 # ---------------------------------------------------------------------
@@ -136,44 +103,6 @@ def get_university_agent(university_id: str, auto_scrape: Optional[bool] = None)
     return agent
 
 
-def get_student_agent(student_id: str) -> Any:
-    """
-    Return the cached personal agent for this student, building it (and
-    assigning a default agent_name if the student doesn't have one yet) on
-    first use.
-    """
-    from agents.agent_identity import ensure_agent_name
-    from agents.student_agent import StudentAgent
-    from django_api.models import StudentProfile
-    from django_api.services import load_profile_data, make_student_id
-
-    key = make_student_id(student_id)
-
-    if key in _student_agents:
-        return _student_agents[key]
-
-    profile_row, _ = StudentProfile.objects.get_or_create(student_id=key)
-    agent_name = ensure_agent_name(profile_row)
-
-    profile_data = load_profile_data(student_id)
-    _student_agents[key] = StudentAgent(profile_data, student_id=key, agent_name=agent_name)
-
-    return _student_agents[key]
-
-
-def drop_student_agent(student_id: str) -> None:
-    """Evict a cached personal agent, e.g. right after its agent_name changes.
-
-    Also evicts the LangGraph runtime's cached per-student context
-    (pure_multi_agent/runtime.py), which is what the chat API actually uses
-    now -- this keeps AgentNameAPIView's rename flow working unchanged."""
-    from django_api.services import make_student_id
-    from pure_multi_agent.runtime import drop_student_context
-
-    _student_agents.pop(make_student_id(student_id), None)
-    drop_student_context(student_id)
-
-
 def get_profile_presenter(university_id: str) -> Any:
     """Return the cached officer-facing ProfilePresenterAgent for a university."""
     if university_id in _profile_presenters:
@@ -183,143 +112,6 @@ def get_profile_presenter(university_id: str) -> Any:
 
     _profile_presenters[university_id] = ProfilePresenterAgent(university_id)
     return _profile_presenters[university_id]
-
-
-# ---------------------------------------------------------------------
-# University querying / synthesis (used by the student's personal agent)
-# ---------------------------------------------------------------------
-
-def query(
-    university_id: str,
-    question: str,
-    student_context: Optional[dict] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Query a specific university agent, building it on demand.
-
-    Called by the student's personal agent when it needs verified
-    information about a program.
-    """
-    try:
-        agent = get_university_agent(university_id)
-    except ValueError:
-        console.print(f"[yellow]No agent available for {university_id}.[/yellow]")
-        return None
-
-    try:
-        return agent.answer(question, student_context)
-    except Exception as exc:
-        console.print(f"[yellow]Query failed for {university_id}: {exc}[/yellow]")
-        return {
-            "agent_name": getattr(agent, "persona", {}).get("agent_name", university_id),
-            "university": getattr(agent, "persona", {}).get("university", university_id),
-            "answer": "I could not answer this because the university agent hit an error.",
-            "error": str(exc),
-        }
-
-
-def query_all(
-    question: str,
-    student_context: Optional[dict] = None,
-    university_ids: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Broadcast a question to every university agent (or a specific subset),
-    building any that aren't cached yet. Useful for cross-program
-    comparisons and "which university fits me" style questions.
-    """
-    responses: List[Dict[str, Any]] = []
-    target_ids = university_ids if university_ids is not None else list_university_ids()
-
-    for university_id in target_ids:
-        try:
-            agent = get_university_agent(university_id)
-            response = agent.answer(question, student_context)
-            if response:
-                responses.append(response)
-        except Exception as exc:
-            console.print(f"[yellow]Query failed for {university_id}: {exc}[/yellow]")
-            responses.append(
-                {
-                    "agent_name": university_id,
-                    "university": university_id,
-                    "answer": "This agent could not answer because it hit an error.",
-                    "error": str(exc),
-                }
-            )
-
-    return responses
-
-
-def synthesise(
-    original_question: str,
-    responses: List[Dict[str, Any]],
-    student_profile: dict,
-) -> str:
-    """
-    When the student's personal agent receives answers from multiple
-    university agents, synthesise them into one clear, personalised answer.
-    """
-    valid_responses = [
-        response
-        for response in responses
-        if response and response.get("answer")
-    ]
-
-    if not valid_responses:
-        return "I wasn't able to get answers from the university agents on that one."
-
-    compiled = "\n\n".join(
-        [
-            (
-                f"{response.get('agent_name', 'University Agent')} "
-                f"({response.get('university', 'Unknown University')}) says:\n"
-                f"{response.get('answer', '')}"
-            )
-            for response in valid_responses
-        ]
-    )
-
-    student_name = student_profile.get("name", "the student")
-
-    synthesis_prompt = f"""You are the student's personal advising agent. Multiple
-university agents in the Korgut Commons have answered a question in the
-background. Synthesise their responses into a single clear, personalised
-answer for {student_name}.
-
-Be specific. Cite university names where relevant. If the agents gave
-different answers, note the differences clearly. Keep your answer
-conversational and direct. Do not mention that you consulted separate
-"agents" mechanically -- speak as the student's one advisor who checked
-with each program.
-
-ORIGINAL QUESTION:
-{original_question}
-
-UNIVERSITY AGENT RESPONSES:
-{compiled}
-"""
-
-    try:
-        client = _get_anthropic_client()
-
-        response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": synthesis_prompt}],
-        )
-
-        return response.content[0].text
-
-    except Exception as exc:
-        console.print(f"[yellow]Synthesis failed: {exc}[/yellow]")
-
-        # Fallback: return combined agent answers instead of crashing.
-        return (
-            "I could not synthesise the responses automatically, but here are the "
-            "university agent answers:\n\n"
-            + compiled
-        )
 
 
 # ---------------------------------------------------------------------

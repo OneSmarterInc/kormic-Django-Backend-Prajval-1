@@ -1,11 +1,8 @@
 # pure_multi_agent/tools/profile_tools.py
-# Ports agents.student_agent.StudentAgent's _student_profile_response,
-# admission_probability, and university_comparison verbatim as tools the
-# agent calls dynamically, instead of a fixed keyword-matched dispatch.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from langchain_core.tools import tool
 
@@ -236,4 +233,62 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
         (identity, research orientation, flexibility, budget, prestige)."""
         return university_comparison(ctx["student_profile"])
 
-    return [show_student_profile, admission_probability_estimate, university_comparison_table]
+    @tool
+    def update_student_profile(
+        name: Optional[str] = None,
+        institution: Optional[str] = None,
+        major: Optional[str] = None,
+        program: Optional[str] = None,
+        gpa: Optional[float] = None,
+        gpa_scale: Optional[float] = None,
+        gre_quant: Optional[int] = None,
+        gre_verbal: Optional[int] = None,
+        toefl: Optional[float] = None,
+        ielts: Optional[float] = None,
+        budget: Optional[float] = None,
+        graduation_year: Optional[int] = None,
+        work_months: Optional[int] = None,
+        research: Optional[str] = None,
+        skills: Optional[List[str]] = None,
+        projects: Optional[List[str]] = None,
+    ) -> str:
+        """Save profile facts the student just stated or corrected in chat --
+        GPA, test scores (GRE/TOEFL/IELTS), budget, institution, major,
+        program, graduation year, work experience, skills, projects, or
+        research interests. Call this immediately whenever such a fact
+        appears in the student's message, even if they were really asking
+        about something else -- this is the only way that fact gets saved;
+        if you don't call it, it's lost after this turn. Only pass the
+        fields actually stated; leave everything else unset."""
+        updates = {
+            "name": name,
+            "institution": institution,
+            "major": major,
+            "program": program,
+            "gpa": gpa,
+            "gpa_scale": gpa_scale,
+            "gre_quant": gre_quant,
+            "gre_verbal": gre_verbal,
+            "toefl": toefl,
+            "ielts": ielts,
+            "budget": budget,
+            "graduation_year": graduation_year,
+            "work_months": work_months,
+            "research": research,
+            "skills": skills,
+            "projects": projects,
+        }
+        cleaned = {key: value for key, value in updates.items() if value is not None}
+
+        if not cleaned:
+            return "No profile fields were provided to update."
+
+        ctx["student_profile"].update(cleaned)
+        return f"Profile updated: {', '.join(cleaned.keys())}."
+
+    return [
+        show_student_profile,
+        admission_probability_estimate,
+        university_comparison_table,
+        update_student_profile,
+    ]

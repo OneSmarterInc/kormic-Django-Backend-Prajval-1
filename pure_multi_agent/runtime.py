@@ -1,13 +1,11 @@
 # pure_multi_agent/runtime.py
 # Public entry point for the LangGraph student-agent chat flow:
 # run_turn(student_id, message) -> (agent_name, reply).
-#
-# Mirrors the lifetime/caching semantics of agents.commons's existing
-# _student_agents cache (one long-lived object per student per worker
-# process, not shared across workers, not durable across restarts) so this
-# migration doesn't change persistence behavior -- only how routing to
-# tools/agents is decided.
-
+# caching the context across turns let the agent answer from a
+# snapshot that could be minutes or hours stale. Only the LangGraph
+# `messages` state (conversation history) is intentionally kept
+# in-process via the shared checkpointer below, since that's genuinely
+# turn-to-turn conversational state with no other durable home.
 from __future__ import annotations
 
 from datetime import datetime
@@ -23,20 +21,24 @@ from pure_multi_agent.tracing import VERBOSE, GraphTraceLogger
 
 console = Console()
 
-# Per-student business context (student_profile/memory/pending verification
-# item/agent_name), analogous to agents.commons._student_agents.
-_student_contexts: Dict[str, Dict[str, Any]] = {}
-
 # Shared checkpointer so conversation history (the `messages` state) persists
-# across per-turn graph rebuilds, keyed by thread_id=student key -- same
-# in-process-only lifetime as _student_contexts above.
+# across per-turn graph rebuilds, keyed by thread_id=student key.
+# In-process-only lifetime -- lost on worker restart, not shared across
+# worker processes. (Swapping in a DB/Redis-backed checkpointer is a real
+# follow-up if this ever runs behind more than one worker process, but is
+# an infrastructure change, not something to fix silently here.)
 _checkpointer = MemorySaver()
 
 
-def _build_context(student_id: str) -> Dict[str, Any]:
+def _load_context(student_id: str) -> Dict[str, Any]:
+    """Load this student's full turn context fresh from the database. Called
+    at the start of every turn -- never cached across turns -- so any
+    profile/resume/GitHub/LinkedIn update made through any other endpoint,
+    or any agent rename, is always visible on the very next message."""
     from agents.agent_identity import ensure_agent_name
     from django_api.models import AriaMemory, StudentProfile
     from django_api.services import load_profile_data, make_student_id
+    from verification.services import list_items
 
     key = make_student_id(student_id)
 
@@ -56,6 +58,13 @@ def _build_context(student_id: str) -> Dict[str, Any]:
     if response_mode not in prompts.VALID_RESPONSE_MODES:
         response_mode = "detailed"
 
+    # The durable source of truth for "is there an open verification item
+    # this student hasn't responded to yet" is the VerificationItem table
+    # itself, not anything held in memory -- re-derive it every turn instead
+    # of threading a flag through a long-lived context object.
+    open_items = list_items(key, "open").get("items", [])
+    pending_item = open_items[0] if open_items else None
+
     return {
         "canonical_student_id": key,
         "student_name": student_profile.get("name") or "there",
@@ -63,20 +72,9 @@ def _build_context(student_id: str) -> Dict[str, Any]:
         "student_profile": student_profile,
         "memory": memory,
         "response_mode": response_mode,
-        "pending_verification_item_id": None,
-        "pending_verification_item": None,
+        "pending_verification_item_id": pending_item["id"] if pending_item else None,
+        "pending_verification_item": pending_item,
     }
-
-
-def _get_or_build_context(student_id: str) -> Dict[str, Any]:
-    from django_api.services import make_student_id
-
-    key = make_student_id(student_id)
-
-    if key not in _student_contexts:
-        _student_contexts[key] = _build_context(student_id)
-
-    return _student_contexts[key]
 
 
 def _persist_context(student_id: str, ctx: Dict[str, Any]) -> None:
@@ -122,7 +120,7 @@ def _extract_reply_text(result: Dict[str, Any]) -> str:
 
 
 def run_turn(student_id: str, message: str) -> tuple[str, str]:
-    ctx = _get_or_build_context(student_id)
+    ctx = _load_context(student_id)
 
     if VERBOSE:
         console.print(
@@ -130,16 +128,6 @@ def run_turn(student_id: str, message: str) -> tuple[str, str]:
             f"agent={ctx['agent_name']} ===[/bold magenta]"
         )
         console.print(f"[dim]student says:[/dim] {message}")
-
-    shortcut = preprocessing.roadmap_shortcut(ctx, message)
-    if shortcut is not None:
-        preprocessing.update_memory(ctx, message, shortcut)
-        _persist_context(student_id, ctx)
-        if VERBOSE:
-            console.print(f"[bold magenta]=== turn resolved via pre-check shortcut ===[/bold magenta]\n")
-        return ctx["agent_name"], shortcut
-
-    preprocessing.extract_profile_information(ctx, message)
 
     system_prompt = prompts.build_runtime_system_prompt(
         agent_name=ctx["agent_name"],
@@ -176,11 +164,3 @@ def run_turn(student_id: str, message: str) -> tuple[str, str]:
         console.print(f"[bold magenta]=== turn complete ({tracer._step} model call(s)) ===[/bold magenta]\n")
 
     return ctx["agent_name"], reply
-
-
-def drop_student_context(student_id: str) -> None:
-    """Evict a cached per-student context, e.g. right after agent_name
-    changes -- mirrors agents.commons.drop_student_agent."""
-    from django_api.services import make_student_id
-
-    _student_contexts.pop(make_student_id(student_id), None)

@@ -1,9 +1,8 @@
 # pure_multi_agent/tools/university_tools.py
-# Dynamic university discovery + consultation. Replaces the old fixed
-# keyword matcher (agents.commons.match_university_ids) deciding which
-# university agent(s) to consult on the model's behalf -- here the model
-# discovers the known universities itself (list_universities) and decides
-# which to call. Single-university calls and the parallel "ask everyone"
+# Dynamic university discovery + consultation. The model discovers the
+# known universities itself (list_universities) and decides which to call --
+# the fixed keyword matcher that used to make this decision on the model's
+# behalf (agents.commons.match_university_ids). Single-university calls and the parallel "ask everyone"
 # fan-out both go through pure_multi_agent.university_graph, which reuses
 # agents.university_agent.UniversityAgent unchanged.
 

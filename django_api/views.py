@@ -717,7 +717,6 @@ class AgentNameAPIView(APIView):
         return Response({"agent_name": agent_name})
 
     def patch(self, request):
-        from agents import commons
         from agents.agent_identity import is_agent_name_available
 
         student_id = request.user.account.student_id
@@ -735,9 +734,8 @@ class AgentNameAPIView(APIView):
         profile.agent_name = new_name
         profile.save(update_fields=["agent_name", "updated_at"])
 
-        # Evict the cached agent so the next chat turn rebuilds with the new name.
-        commons.drop_student_agent(student_key)
-
+        # No cache to evict -- pure_multi_agent.runtime loads agent_name fresh
+        # from the database on every turn, so the new name is already live.
         return Response({"agent_name": profile.agent_name})
 
 

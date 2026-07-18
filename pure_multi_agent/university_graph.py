@@ -85,7 +85,8 @@ def ask_all(
     max_concurrency: int = 5,
 ) -> list:
     """Parallel fan-out across every known university, handled by the graph
-    runtime's .batch() (replaces agents.commons.query_all's hand-rolled loop)."""
+    runtime's .batch() -- the old hand-rolled for-loop this replaced
+    (agents.commons.query_all) has since been deleted as dead code."""
     target_ids = university_ids if university_ids is not None else commons.list_university_ids()
 
     inputs = [
