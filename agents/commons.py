@@ -67,13 +67,38 @@ def list_agents() -> List[str]:
 
 
 # University directory -- single source of truth for which university ids
-# exist, read directly from personas.university_personas.
+# exist, read from the universities app's University table (self-service,
+# no hardcoded persona dict).
 
 def list_university_ids() -> List[str]:
-    """Every known university id, in persona-definition order."""
-    from personas.university_personas import UNIVERSITY_PERSONAS
+    """Every known university id, name-sorted."""
+    from universities.models import University
 
-    return list(UNIVERSITY_PERSONAS.keys())
+    return list(University.objects.order_by("name").values_list("id", flat=True))
+
+
+def list_university_directory() -> List[Dict[str, str]]:
+    """id/name/agent_name for every known university, in one query --
+    backs read-only directory lookups (e.g. the student agent's
+    list_universities tool) without building a full UniversityAgent."""
+    from universities.models import University
+
+    return [
+        {"id": row.id, "name": row.name, "agent_name": row.agent_name or row.id}
+        for row in University.objects.order_by("name")
+    ]
+
+
+def get_university_agent_label(university_id: str) -> str:
+    """Display label (agent name, falling back to name/id) for a university
+    without constructing a full UniversityAgent."""
+    from universities.models import University
+
+    university = University.objects.filter(pk=university_id).first()
+    if university is None:
+        return university_id
+
+    return university.agent_name or university.name or university_id
 
 
 # ---------------------------------------------------------------------
@@ -89,9 +114,9 @@ def get_university_agent(university_id: str, auto_scrape: Optional[bool] = None)
         return _university_agents[university_id]
 
     from agents.university_agent import UniversityAgent
-    from personas.university_personas import UNIVERSITY_PERSONAS
+    from universities.models import University
 
-    if university_id not in UNIVERSITY_PERSONAS:
+    if not University.objects.filter(pk=university_id).exists():
         raise ValueError(f"Unknown university_id: {university_id}")
 
     if auto_scrape is None:
@@ -224,13 +249,14 @@ def _fallback_fit_assessment(profile: Dict[str, Any], university_id: str, agent:
     else:
         gaps.append("Budget may be tight for US graduate study.")
 
-    from personas.university_personas import UNIVERSITY_PERSONAS
+    from universities.models import University
 
-    persona = UNIVERSITY_PERSONAS.get(university_id, {})
-    university_name = persona.get("name", university_id)
-    agent_name = persona.get("agent_name") or (getattr(agent, "agent_name", university_id) if agent else university_id)
-    if university_id == "franklin_cs":
-        score += 3
+    university = University.objects.filter(pk=university_id).first()
+    university_name = university.name if university else university_id
+    agent_name = (
+        (university.agent_name if university else None)
+        or (getattr(agent, "agent_name", university_id) if agent else university_id)
+    )
 
     score = max(0, min(100, int(score)))
 

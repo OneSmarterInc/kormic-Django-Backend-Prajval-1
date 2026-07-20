@@ -54,6 +54,7 @@ INSTALLED_APPS = [
     'accounts',
     'django_api',
     'verification',
+    'universities',
 ]
 
 MIDDLEWARE = [

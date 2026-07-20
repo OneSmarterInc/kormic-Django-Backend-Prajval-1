@@ -365,11 +365,11 @@ def build_agent_system_prompt(student_profile: dict, agent_name: str = "Aria") -
 
     profile_context = "\n\nSTUDENT YOU ARE ADVISING:\n" + "\n".join(profile_lines)
 
-    from personas.university_personas import UNIVERSITY_PERSONAS
+    from agents import commons
 
     profile_context += "\n\nUNIVERSITY AGENTS AVAILABLE IN THE KORGUT COMMONS:\n"
-    for university_id, persona in UNIVERSITY_PERSONAS.items():
-        profile_context += f"- {university_id}: {persona.get('name', university_id)}\n"
+    for university in commons.list_university_directory():
+        profile_context += f"- {university['id']}: {university['name']}\n"
     profile_context += "More agents may be added as the Commons grows.\n"
 
     profile_context += """

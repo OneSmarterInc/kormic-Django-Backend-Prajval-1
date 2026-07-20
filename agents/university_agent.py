@@ -14,7 +14,6 @@ from rich.console import Console
 
 from knowledge.scraper import scrape_university
 from knowledge.university_kb import UniversityKnowledgeBase
-from personas.university_personas import UNIVERSITY_PERSONAS
 
 console = Console()
 
@@ -51,11 +50,16 @@ class UniversityAgent:
     MIN_CONFIDENCE = 0.6
 
     def __init__(self, university_id: str, auto_scrape: bool = True):
-        if university_id not in UNIVERSITY_PERSONAS:
+        from universities.models import University
+        from universities.services import build_persona_dict
+
+        try:
+            university = University.objects.get(pk=university_id)
+        except University.DoesNotExist:
             raise ValueError(f"Unknown university: {university_id}")
 
         self.university_id = university_id
-        self.persona = UNIVERSITY_PERSONAS[university_id]
+        self.persona = build_persona_dict(university)
         self.kb = UniversityKnowledgeBase(university_id)
 
         seed_facts = self.persona.get("key_facts_seed", [])

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
+from django.db import transaction
 from rest_framework import serializers
 
 from accounts.models import Account
 from django_api.models import LinkedInAnalysis, ResumeUpload, StudentProfile
 from django_api.services import make_student_id
-from personas.university_personas import UNIVERSITY_PERSONAS
 
 
 class RegisterSerializer(serializers.Serializer):
@@ -16,8 +16,8 @@ class RegisterSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=Account.Role.choices)
     name = serializers.CharField(required=False, allow_blank=True, default="")
 
-    # role=university
     university_id = serializers.CharField(required=False, allow_blank=True)
+    institution_name = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate_email(self, value: str) -> str:
         if User.objects.filter(email__iexact=value).exists():
@@ -40,31 +40,56 @@ class RegisterSerializer(serializers.Serializer):
             attrs["student_id"] = student_id
 
         elif role == Account.Role.UNIVERSITY:
-            university_id = attrs.get("university_id")
-            if not university_id or university_id not in UNIVERSITY_PERSONAS:
-                raise serializers.ValidationError({
-                    "university_id": (
-                        f"Unknown university_id. Must be one of: {', '.join(UNIVERSITY_PERSONAS.keys())}"
+            from universities.models import University
+
+            university_id = str(attrs.get("university_id") or "").strip()
+            institution_name = str(attrs.get("institution_name") or "").strip()
+
+            if university_id:
+                if not University.objects.filter(pk=university_id).exists():
+                    raise serializers.ValidationError(
+                        {"university_id": f"Unknown university_id: {university_id}"}
                     )
-                })
+            elif not institution_name:
+                raise serializers.ValidationError(
+                    {
+                        "institution_name": (
+                            "Provide institution_name to register a new university, "
+                            "or university_id to join an already-registered one."
+                        )
+                    }
+                )
 
         return attrs
 
     def create(self, validated_data) -> User:
-        email = validated_data["email"]
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=validated_data["password"],
-            first_name=validated_data.get("name", "")[:150],
-        )
+        from universities.services import register_university
 
-        Account.objects.create(
-            user=user,
-            role=validated_data["role"],
-            student_id=validated_data.get("student_id"),
-            university_id=validated_data.get("university_id") or None,
-        )
+        email = validated_data["email"]
+
+        with transaction.atomic():
+            user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=validated_data["password"],
+                first_name=validated_data.get("name", "")[:150],
+            )
+
+            university_id = None
+            if validated_data["role"] == Account.Role.UNIVERSITY:
+                existing_id = str(validated_data.get("university_id") or "").strip()
+                if existing_id:
+                    university_id = existing_id
+                else:
+                    university = register_university(validated_data["institution_name"])
+                    university_id = university.id
+
+            Account.objects.create(
+                user=user,
+                role=validated_data["role"],
+                student_id=validated_data.get("student_id"),
+                university_id=university_id,
+            )
 
         return user
 
@@ -125,5 +150,10 @@ def serialize_user(user: User) -> dict:
 
     if account and account.role == Account.Role.STUDENT and account.student_id:
         data["onboarding"] = student_onboarding_status(account.student_id)
+
+    if account and account.role == Account.Role.UNIVERSITY and account.university_id:
+        from universities.services import university_setup_status
+
+        data["university_setup_status"] = university_setup_status(account.university_id)
 
     return data

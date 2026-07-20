@@ -145,6 +145,7 @@ class UniversityKnowledgeBase:
         "human_verified": 1.6,
         "verified": 1.5,
         "seed": 1.3,
+        "manual": 1.3,
         "scraped": 1.15,
         "official_page": 1.15,
         "conversation": 0.85,
@@ -431,6 +432,7 @@ class UniversityKnowledgeBase:
         for entry in sorted_entries:
             source_label = {
                 "seed": "VERIFIED SEED",
+                "manual": "ADMIN ENTERED",
                 "scraped": "FROM WEBSITE",
                 "official_page": "FROM OFFICIAL PAGE",
                 "conversation": "LEARNED",

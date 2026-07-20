@@ -19,3 +19,7 @@ frontend_integration_guide.md
 context_files/
 reports/
 new_project_flow.md
+.claude/
+kormic_architecture_diagrams.html
+university_onboarding_flow.md
+complete_project_flow.md

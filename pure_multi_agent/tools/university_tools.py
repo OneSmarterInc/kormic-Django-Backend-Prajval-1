@@ -4,7 +4,10 @@
 # the fixed keyword matcher that used to make this decision on the model's
 # behalf (agents.commons.match_university_ids). Single-university calls and the parallel "ask everyone"
 # fan-out both go through pure_multi_agent.university_graph, which reuses
-# agents.university_agent.UniversityAgent unchanged.
+# agents.university_agent.UniversityAgent unchanged. University identity is
+# read through agents.commons's directory helpers (DB-backed, self-service
+# universities app) rather than a hardcoded persona dict, keeping this
+# module decoupled from the universities app directly.
 
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ from langchain_core.tools import tool
 from rich.console import Console
 
 from agents import commons
-from personas.university_personas import UNIVERSITY_PERSONAS
 from pure_multi_agent import university_graph
 
 console = Console()
@@ -49,10 +51,7 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
         """List every university agent available in the Korgut Commons (id
         and display name). Use this to discover what universities you can
         consult before asking one by id."""
-        lines = [
-            f"- {university_id}: {persona.get('name', university_id)}"
-            for university_id, persona in UNIVERSITY_PERSONAS.items()
-        ]
+        lines = [f"- {u['id']}: {u['name']}" for u in commons.list_university_directory()]
         return "\n".join(lines) if lines else "No university agents are configured."
 
     @tool
@@ -62,7 +61,7 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
         courses, or anything needing verified/scraped/human-verified
         knowledge rather than general advising judgment."""
         result = university_graph.ask_one(university_id, question, ctx["student_profile"])
-        agent_label = UNIVERSITY_PERSONAS.get(university_id, {}).get("agent_name", university_id)
+        agent_label = commons.get_university_agent_label(university_id)
         return _format_result(result, agent_label)
 
     @tool
