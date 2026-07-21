@@ -170,6 +170,15 @@ def add_manual_knowledge_fact(
     )
 
 
+_COMPLETION_STEPS = [
+    ("has_description", "Add a program description."),
+    ("has_contacts", "Add at least one contact detail (email, phone, website, or address)."),
+    ("has_eligibility_criteria", "Add eligibility criteria."),
+    ("has_scrape_urls", "Save at least one official page URL to scrape."),
+    ("has_knowledge_facts", "Add or scrape at least one knowledge base fact."),
+]
+
+
 def university_setup_status(university_id: str) -> Dict[str, Any]:
     """Derived fresh from real data every call, never a stored flag --
     mirrors accounts.serializers.student_onboarding_status."""
@@ -186,6 +195,8 @@ def university_setup_status(university_id: str) -> Dict[str, Any]:
             "has_scrape_urls": False,
             "has_knowledge_facts": False,
             "setup_complete": False,
+            "completion_percentage": 0,
+            "missing_steps": [text for _, text in _COMPLETION_STEPS],
         }
 
     has_contacts = bool(
@@ -199,14 +210,25 @@ def university_setup_status(university_id: str) -> Dict[str, Any]:
     has_knowledge_facts = UniversityKnowledgeEntry.objects.filter(university_id=university_id).exists()
     has_description = bool(university.description)
 
-    return {
-        "profile_exists": True,
+    flags = {
         "has_description": has_description,
         "has_contacts": has_contacts,
         "has_eligibility_criteria": has_eligibility_criteria,
         "has_scrape_urls": has_scrape_urls,
         "has_knowledge_facts": has_knowledge_facts,
+    }
+
+    completed_count = sum(1 for flag_name, _ in _COMPLETION_STEPS if flags[flag_name])
+    completion_percentage = round((completed_count / len(_COMPLETION_STEPS)) * 100)
+    missing_steps = [text for flag_name, text in _COMPLETION_STEPS if not flags[flag_name]]
+
+    return {
+        "profile_exists": True,
+        **flags,
+       
         "setup_complete": (
             has_description and has_contacts and has_eligibility_criteria and has_knowledge_facts
         ),
+        "completion_percentage": completion_percentage,
+        "missing_steps": missing_steps,
     }

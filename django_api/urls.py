@@ -17,9 +17,9 @@ urlpatterns = [
         views.LinkedInImageDetailAPIView.as_view(),
         name="profile-linkedin-image-detail",
     ),
+    path("profile/agent-name/", views.AgentNameAPIView.as_view(), name="agent-name"),
     path("profile/<str:student_id>/", views.ProfileDetailAPIView.as_view(), name="profile-detail"),
     path("profile/<str:student_id>/image/", views.ProfileImageDetailAPIView.as_view(), name="profile-image-detail"),
-    path("profile/agent-name/", views.AgentNameAPIView.as_view(), name="agent-name"),
 
     # Persistent GET APIs for profile sub-resource history
     path("profile/<str:student_id>/resumes/", views.ResumeHistoryView.as_view(), name="profile-resume-history"),
@@ -61,6 +61,12 @@ urlpatterns = [
         "university/<str:university_id>/profile/<str:student_id>/chat/history/",
         views.university_profile_presenter_chat_history,
         name="university-profile-chat-history",
+    ),
+    path("university/<str:university_id>/chat/", views.university_agent_chat, name="university-agent-chat"),
+    path(
+        "university/<str:university_id>/chat/history/",
+        views.university_agent_chat_history,
+        name="university-agent-chat-history",
     ),
     path("university/<str:university_id>/questions/", views.UniversityQuestionsView.as_view(), name="university-questions"),
     path("university/<str:university_id>/queries/", views.UniversityQueriesView.as_view(), name="university-queries"),

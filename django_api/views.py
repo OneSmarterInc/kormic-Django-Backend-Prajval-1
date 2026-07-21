@@ -1264,6 +1264,14 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
 
     try:
         from agents import commons
+
+        if not (profile.get("assessments") or {}).get(university_id):
+            try:
+                commons.generate_fit_assessment(student_id, university_id)
+                profile = get_profile(student_id)
+            except Exception:
+                pass
+
         presenter = commons.get_profile_presenter(university_id)
         answer = presenter.answer(question=question, profile=profile, conversation_history=history)
         log_chat_turn(
@@ -1290,6 +1298,72 @@ def university_profile_presenter_chat_history(request, university_id: str, stude
     messages = ChatMessage.objects.filter(
         channel=ChatMessage.Channel.PRESENTER, student_id=student_id, university_id=university_id
     )
+    return Response({
+        "count": messages.count(),
+        "messages": [
+            {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
+            for m in messages
+        ],
+    })
+
+
+@api_view(["POST"])
+@permission_classes(UNIVERSITY_OWNER_PERMISSIONS)
+def university_agent_chat(request, university_id: str):
+    """
+    POST /api/university/<university_id>/chat/
+    University-officer-facing chat with their OWN program agent
+    (agents.university_agent.UniversityAgent -- the exact same agent a
+    student's ask_university tool consults), so an officer can preview/test
+    how it answers. Distinct from university_profile_presenter_chat, which
+    answers about one student's profile instead of about the program.
+    """
+    message = request.data.get("message") or request.data.get("question")
+
+    if not message:
+        return api_error("message is required.")
+
+    try:
+        from agents import commons
+        agent = commons.get_university_agent(university_id)
+    except ValueError as exc:
+        return api_error(str(exc), status.HTTP_404_NOT_FOUND)
+
+    try:
+        result = agent.answer(message, caller_role="officer")
+        reply = result.get("answer", "")
+        log_chat_turn(
+            channel=ChatMessage.Channel.UNIVERSITY,
+            student_id="",
+            university_id=university_id,
+            user_message=message,
+            assistant_message=reply,
+            meta={
+                "confidence": result.get("confidence"),
+                "trust": result.get("trust"),
+                "pending": result.get("pending", False),
+                "pending_query": result.get("pending_query"),
+                "source": result.get("source"),
+            },
+        )
+        return Response({
+            "university_id": university_id,
+            "agent_name": result.get("agent_name"),
+            "reply": reply,
+            "pending": result.get("pending", False),
+            "pending_query": result.get("pending_query"),
+            "confidence": result.get("confidence"),
+            "trust": result.get("trust"),
+        })
+    except Exception as exc:
+        return api_error(f"University agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["GET"])
+@permission_classes(UNIVERSITY_OWNER_PERMISSIONS)
+def university_agent_chat_history(request, university_id: str):
+    """GET /api/university/<university_id>/chat/history/"""
+    messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.UNIVERSITY, university_id=university_id)
     return Response({
         "count": messages.count(),
         "messages": [

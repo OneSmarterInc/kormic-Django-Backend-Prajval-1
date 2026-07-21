@@ -201,7 +201,7 @@ class UniversityAgent:
     # Prompt builders
     # --------------------------------------------------
 
-    def _build_system_prompt(self) -> str:
+    def _build_system_prompt(self, caller_role: str = "student") -> str:
         knowledge_context = self.kb.get_full_context()
 
         response_style = """
@@ -224,7 +224,20 @@ Human-verified knowledge has highest priority.
 If a human-verified answer exists, use it directly.
 """
 
-        return self.persona["constitution"] + response_style + "\n\n" + knowledge_context
+        officer_context = ""
+        if caller_role == "officer":
+            program_name = self.persona["name"]
+            officer_context = f"""
+
+CALLER CONTEXT:
+You are talking to your own {program_name} admissions officer, logged into
+{program_name}'s own dashboard -- there is no other way to reach this chat.
+"My university", "our university", "we", and "my program" always mean
+{program_name} itself. Never ask them to identify, confirm, or name their
+university or program; you already know it.
+"""
+
+        return self.persona["constitution"] + response_style + officer_context + "\n\n" + knowledge_context
 
     def _build_student_context(self, student_context: Optional[dict] = None) -> str:
         if not student_context:
@@ -620,9 +633,20 @@ STUDENT CONTEXT:
     # Answering
     # --------------------------------------------------
 
-    def answer(self, question: str, student_context: Optional[dict] = None) -> Dict[str, Any]:
+    def answer(
+        self,
+        question: str,
+        student_context: Optional[dict] = None,
+        caller_role: str = "student",
+    ) -> Dict[str, Any]:
         """
         Answer a question from Aria or direct mode.
+
+        caller_role distinguishes a student's agent asking on the student's
+        behalf ("student", the default) from the university's own officer
+        previewing/testing the agent directly ("officer") -- the latter adds
+        system-prompt context so the agent knows "my university"/"we" refers
+        to itself instead of asking the officer to identify their school.
 
         If the answer cannot be supported with enough confidence,
         a pending query is created instead of hallucinating.
@@ -692,7 +716,7 @@ STUDENT:
             response = client.messages.create(
                 model=MODEL,
                 max_tokens=1000,
-                system=self._build_system_prompt(),
+                system=self._build_system_prompt(caller_role=caller_role),
                 messages=[{"role": "user", "content": prompt}],
             )
 

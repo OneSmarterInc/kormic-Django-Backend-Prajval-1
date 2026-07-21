@@ -1,5 +1,6 @@
 # agents/profile_presenter.py
 
+import json
 import os
 from typing import Dict, List, Optional, Any
 
@@ -15,19 +16,28 @@ if not api_key:
 
 client = anthropic.Anthropic(api_key=api_key)
 
-MODEL = os.getenv("PROFILE_PRESENTER_MODEL", "claude-3-5-haiku-latest")
+MODEL = os.getenv("PROFILE_PRESENTER_MODEL", "claude-haiku-4-5-20251001")
 
 
-PROFILE_PRESENTER_CONSTITUTION = """
-You are Korgut, a university-facing admissions profile presenter.
+def _build_presenter_constitution(university_name: str, agent_name: str) -> str:
+    return f"""
+You are {agent_name}, {university_name}'s university-facing admissions profile presenter.
+
+You ARE {university_name}. The person asking you questions is already logged in
+as a {university_name} admissions officer -- that is the only way to reach this
+chat. Never ask who they represent, never ask them to confirm or name their
+university/program, and never treat "our university" or "my university" as
+ambiguous -- it always means {university_name}.
 
 You serve the university officer, not the student.
-Your job is to explain whether a student is worth attention.
+Your job is to explain whether a student is worth attention, and whether they
+fit {university_name}'s own admission standards using the assessment data
+provided below (which was generated specifically against {university_name}'s
+knowledge base/criteria).
 
 Rules:
 - Be honest about weaknesses.
-- Use only profile data.
-- Do not invent missing data.
+- Use only profile data and the fit assessment provided -- do not invent data.
 - Keep answers short.
 - Mention missing fields clearly.
 - Help the officer decide whether to invite, reject, or ask follow-up questions.
@@ -37,6 +47,13 @@ Rules:
 class ProfilePresenterAgent:
     def __init__(self, university_id: str):
         self.university_id = university_id
+
+        from universities.models import University
+
+        university = University.objects.filter(pk=university_id).first()
+        self.university_name = university.name if university else university_id
+        self.agent_name = (university.agent_name if university else None) or university_id
+        self.constitution = _build_presenter_constitution(self.university_name, self.agent_name)
 
     def _audit_failure(
         self,
@@ -157,7 +174,7 @@ class ProfilePresenterAgent:
                 model=MODEL,
                 max_tokens=350,
                 system=(
-                    PROFILE_PRESENTER_CONSTITUTION
+                    self.constitution
                     + "\n\nPROFILE:\n"
                     + self._profile_context(profile)
                 ),
