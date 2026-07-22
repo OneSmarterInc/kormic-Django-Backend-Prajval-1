@@ -362,10 +362,9 @@ class KnowledgeFactDetailAPIView(APIView):
     PATCH /api/university-admin/knowledge/<int:fact_id>/
         Body: any of {"topic": "...", "content": "...", "confidence": 1.0}
     DELETE /api/university-admin/knowledge/<int:fact_id>/
-    Both are restricted to source_type in ("manual", "seed") -- editing or
-    deleting scraped/conversation/human_verified rows is blocked to avoid
-    corrupting provenance through a generic edit action; re-scrape or
-    resolving a pending query are the correct paths for those.
+    Editing/deleting is allowed for any source_type (seed, manual, scraped,
+    conversation, human_verified) -- an officer may need to correct or
+    remove a fact regardless of how it entered the knowledge base.
     """
 
     permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
@@ -384,13 +383,6 @@ class KnowledgeFactDetailAPIView(APIView):
 
         if entry is None:
             return None, _error("Knowledge fact not found.", status.HTTP_404_NOT_FOUND)
-
-        if entry.source_type not in ("manual", "seed"):
-            return None, _error(
-                f"Cannot modify a '{entry.source_type}' fact through this endpoint. "
-                "Re-scrape to refresh scraped facts, or resolve the related pending "
-                "query for human-verified/conversation facts."
-            )
 
         return entry, None
 

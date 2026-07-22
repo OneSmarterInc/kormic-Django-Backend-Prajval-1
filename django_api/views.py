@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 from pathlib import Path
@@ -54,6 +55,8 @@ from django_api.services import (
     make_student_id,
     upload_profile_image,
 )
+
+logger = logging.getLogger(__name__)
 
 STUDENT_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
 STUDENT_OWNER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole, ScopedToOwnStudentId]
@@ -765,6 +768,17 @@ def agent_chat(request):
             user_message=message,
             assistant_message=reply or "",
         )
+
+        # Push notification so the student is alerted even if they closed
+        # the app while this (possibly slow) turn was being generated. A
+        # notification failure must never fail the chat response itself.
+        try:
+            from notifications.services import notify_agent_reply
+
+            notify_agent_reply(student_id=student_id, agent_name=agent_name, reply=reply or "")
+        except Exception:
+            logger.exception("Failed to queue agent-reply push notification for student_id=%s", student_id)
+
         return Response({"agent": agent_name, "student_id": student_id, "reply": reply})
     except Exception as exc:
         return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1082,6 +1096,28 @@ class AnswerPendingQueryView(APIView):
             resolved = agent.resolve_pending_query(query_id=query_id_int, answer=answer, answered_by=answered_by)
             if not resolved:
                 return Response({"status": "failed", "message": "Could not resolve pending query."}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Surface the resolution back to the student: drop it into their
+            # agent chat thread and push-notify them, even if they're not
+            # in the app right now. 
+            if selected_query.student_id:
+                try:
+                    from notifications.services import notify_pending_query_resolved
+
+                    notify_pending_query_resolved(
+                        student_id=selected_query.student_id,
+                        university_id=university_id,
+                        question=selected_query.question,
+                        answer=answer,
+                        query_id=query_id_int,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to notify student_id=%s of resolved query_id=%s",
+                        selected_query.student_id,
+                        query_id_int,
+                    )
+
             return Response(
                 {"status": "success", "message": "Saved to Knowledge Base", "query_id": query_id_int, "university_id": university_id},
                 status=status.HTTP_200_OK,

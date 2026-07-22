@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -55,6 +56,7 @@ INSTALLED_APPS = [
     'django_api',
     'verification',
     'universities',
+    'notifications',
 ]
 
 MIDDLEWARE = [
@@ -209,3 +211,23 @@ CACHES = {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
     }
 }
+
+
+# Celery -- background delivery for push notifications (see notifications/).
+# Chat/agent processing itself stays synchronous (pure_multi_agent.runtime
+# keeps its LangGraph checkpointer in-process, keyed by worker; routing that
+# through Celery would split a student's conversation across worker
+# processes). Celery is used only for the "send this push" side-effect,
+# which is safely fire-and-forget.
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TIME_LIMIT = 30
+CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
+
+# Expo push notifications (student mobile app).
+EXPO_PUSH_ACCESS_TOKEN = os.environ.get("EXPO_PUSH_ACCESS_TOKEN", "")
