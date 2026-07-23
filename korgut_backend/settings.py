@@ -14,6 +14,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from django.db.backends.signals import connection_created
 from dotenv import load_dotenv
 
@@ -57,6 +58,7 @@ INSTALLED_APPS = [
     'verification',
     'universities',
     'notifications',
+    'project_superuser',
 ]
 
 MIDDLEWARE = [
@@ -228,6 +230,21 @@ CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_TASK_TIME_LIMIT = 30
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
+
+# Proactive agent outreach (notifications.tasks.run_proactive_checkins_task):
+# once a day, the agent scans for students it hasn't nudged in
+# PROACTIVE_CHECKIN_COOLDOWN_DAYS and, if their profile has a genuine gap
+# worth mentioning, messages them on its own. Requires a `celery beat`
+# process running alongside the worker -- see notifications/proactive.py.
+PROACTIVE_CHECKIN_HOUR = int(os.environ.get("PROACTIVE_CHECKIN_HOUR", "9"))
+PROACTIVE_CHECKIN_COOLDOWN_DAYS = int(os.environ.get("PROACTIVE_CHECKIN_COOLDOWN_DAYS", "7"))
+
+CELERY_BEAT_SCHEDULE = {
+    "proactive-agent-checkins": {
+        "task": "notifications.tasks.run_proactive_checkins_task",
+        "schedule": crontab(hour=PROACTIVE_CHECKIN_HOUR, minute=0),
+    },
+}
 
 # Expo push notifications (student mobile app).
 EXPO_PUSH_ACCESS_TOKEN = os.environ.get("EXPO_PUSH_ACCESS_TOKEN", "")

@@ -5,7 +5,10 @@ from django.core.management import call_command
 from django.test import TestCase
 from rest_framework import status
 
-from django_api.models import ChatMessage, PendingQuery
+from django.utils import timezone
+from datetime import timedelta
+
+from django_api.models import ChatMessage, PendingQuery, StudentProfile
 from django_api.tests import _reset_inprocess_agent_caches, make_student_client, make_university_client
 from notifications.models import NotificationLog, PushToken
 
@@ -447,3 +450,205 @@ class AgentInitiatedMessageCommandTests(TestCase):
 
         with self.assertRaises(CommandError):
             call_command("send_agent_message", "no-such-student", "hi")
+
+
+# ---------------------------------------------------------------------
+# Proactive agent outreach (notifications/proactive.py) -- the agent
+# noticing something and messaging the student without being asked first.
+# ---------------------------------------------------------------------
+
+class BuildCheckinMessageTests(TestCase):
+    """Pure-function tests: no DB, compute_profile_intelligence is mocked so
+    these don't depend on the exact scoring thresholds in django_api.services."""
+
+    def _mock_intelligence(self, weaknesses=None, missing_items=None):
+        return mock.patch(
+            "django_api.services.compute_profile_intelligence",
+            return_value={
+                "weaknesses": weaknesses or [],
+                "profile_completeness": {"missing_items": missing_items or []},
+            },
+        )
+
+    def test_real_gaps_take_priority_over_weaknesses_and_missing_items(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": ["Research interests", "GitHub profile", "budget", "target_disciplines"]}
+        with self._mock_intelligence(weaknesses=["some weakness"], missing_items=["some field"]):
+            message = build_checkin_message(profile)
+
+        self.assertIn("Research interests", message)
+        self.assertIn("GitHub profile", message)
+        self.assertNotIn("some weakness", message)
+        self.assertNotIn("budget", message)  # placeholder gap filtered out
+
+    def test_falls_back_to_weaknesses_when_only_placeholder_gaps(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": ["budget", "target_disciplines"]}
+        with self._mock_intelligence(weaknesses=["GPA is not provided."], missing_items=["LinkedIn profile"]):
+            message = build_checkin_message(profile)
+
+        self.assertIn("GPA is not provided.", message)
+
+    def test_falls_back_to_missing_items_when_no_gaps_or_weaknesses(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": []}
+        with self._mock_intelligence(weaknesses=[], missing_items=["LinkedIn profile"]):
+            message = build_checkin_message(profile)
+
+        self.assertIn("LinkedIn profile", message)
+
+    def test_returns_none_when_nothing_to_say(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": ["budget", "target_disciplines"]}
+        with self._mock_intelligence(weaknesses=[], missing_items=[]):
+            message = build_checkin_message(profile)
+
+        self.assertIsNone(message)
+
+    def test_single_talking_point_phrasing(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": ["Missing GitHub profile."]}
+        with self._mock_intelligence():
+            message = build_checkin_message(profile)
+
+        self.assertTrue(message.startswith("Quick suggestion -- Missing GitHub profile."))
+
+    def test_multi_talking_point_phrasing(self):
+        from notifications.proactive import build_checkin_message
+
+        profile = {"gaps": ["Gap one", "Gap two"]}
+        with self._mock_intelligence():
+            message = build_checkin_message(profile)
+
+        self.assertIn("Gap one", message)
+        self.assertIn("Gap two", message)
+        self.assertIn("a few gaps", message)
+
+
+class RunCheckinForStudentTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student, self.student_id = make_student_client(email="proactive1@example.com")
+        StudentProfile.objects.update_or_create(
+            student_id=self.student_id, defaults={"name": "Carol", "gaps": ["GitHub profile is missing."]}
+        )
+        from accounts.models import Account
+
+        self.account = Account.objects.get(student_id=self.student_id)
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_sends_and_writes_chat_message_when_gap_exists(self, mock_delay):
+        from notifications.proactive import run_checkin_for_student
+
+        log = run_checkin_for_student(self.student_id)
+
+        self.assertIsNotNone(log)
+        self.assertEqual(log.event_type, NotificationLog.EventType.PROACTIVE_CHECKIN)
+        self.assertIn("GitHub profile is missing.", log.body)
+        mock_delay.assert_called_once_with(log.id)
+
+        chat_msg = ChatMessage.objects.filter(
+            student_id=self.student_id, channel=ChatMessage.Channel.AGENT
+        ).latest("created_at")
+        self.assertIn("GitHub profile is missing.", chat_msg.content)
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_second_call_within_cooldown_is_skipped(self, mock_delay):
+        from notifications.proactive import run_checkin_for_student
+
+        first = run_checkin_for_student(self.student_id, cooldown_days=7)
+        second = run_checkin_for_student(self.student_id, cooldown_days=7)
+
+        self.assertIsNotNone(first)
+        self.assertIsNone(second)
+        mock_delay.assert_called_once()
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_sends_again_after_cooldown_expires(self, mock_delay):
+        from notifications.proactive import run_checkin_for_student
+
+        stale_log = NotificationLog.objects.create(
+            account=self.account,
+            event_type=NotificationLog.EventType.PROACTIVE_CHECKIN,
+            title="Quick suggestion from your agent",
+            body="old nudge",
+        )
+        stale_log.created_at = timezone.now() - timedelta(days=8)
+        stale_log.save(update_fields=["created_at"])
+
+        result = run_checkin_for_student(self.student_id, cooldown_days=7)
+
+        self.assertIsNotNone(result)
+        mock_delay.assert_called_once_with(result.id)
+
+    def test_unknown_student_returns_none(self):
+        from notifications.proactive import run_checkin_for_student
+
+        self.assertIsNone(run_checkin_for_student("no-such-student"))
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_complete_profile_with_no_gaps_sends_nothing(self, mock_delay):
+        from notifications.proactive import run_checkin_for_student
+
+        StudentProfile.objects.update_or_create(student_id=self.student_id, defaults={"gaps": []})
+        with mock.patch("django_api.services.compute_profile_intelligence") as mock_intel:
+            mock_intel.return_value = {
+                "weaknesses": [],
+                "profile_completeness": {"missing_items": []},
+            }
+            result = run_checkin_for_student(self.student_id)
+
+        self.assertIsNone(result)
+        mock_delay.assert_not_called()
+
+
+class ProactiveCheckinTaskTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student_a, self.student_a_id = make_student_client(email="proactive-a@example.com")
+        self.student_b, self.student_b_id = make_student_client(email="proactive-b@example.com")
+        StudentProfile.objects.update_or_create(
+            student_id=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
+        )
+        StudentProfile.objects.update_or_create(
+            student_id=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
+        )
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_task_nudges_every_eligible_student_once(self, mock_delay):
+        from notifications.tasks import run_proactive_checkins_task
+
+        result = run_proactive_checkins_task()
+
+        self.assertEqual(result["sent"], 2)
+        self.assertEqual(
+            NotificationLog.objects.filter(event_type=NotificationLog.EventType.PROACTIVE_CHECKIN).count(), 2
+        )
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_task_skips_students_without_a_real_account(self, mock_delay):
+        from notifications.tasks import run_proactive_checkins_task
+
+        StudentProfile.objects.create(student_id="ghost-profile", name="Ghost", gaps=["orphan gap"])
+
+        result = run_proactive_checkins_task()
+
+        self.assertEqual(result["sent"], 2)  # only Alice and Bob, not the ghost profile
+        self.assertEqual(result["skipped"], 0)
+
+    @mock.patch("notifications.services.send_push_notification_task.delay")
+    def test_task_second_run_same_day_skips_everyone(self, mock_delay):
+        from notifications.tasks import run_proactive_checkins_task
+
+        run_proactive_checkins_task()
+        second_result = run_proactive_checkins_task()
+
+        self.assertEqual(second_result["sent"], 0)
+        self.assertEqual(second_result["skipped"], 2)

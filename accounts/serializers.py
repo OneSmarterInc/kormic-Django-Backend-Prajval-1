@@ -11,9 +11,13 @@ from django_api.services import make_student_id
 
 
 class RegisterSerializer(serializers.Serializer):
+    # Deliberately not Account.Role.choices -- SUPERUSER must never be
+    # reachable through public self-registration. Superuser accounts are
+    # only created via the create_superuser_account management command or
+    # an existing superuser's /api/superuser/users/create-superuser/.
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
-    role = serializers.ChoiceField(choices=Account.Role.choices)
+    role = serializers.ChoiceField(choices=[Account.Role.STUDENT, Account.Role.UNIVERSITY])
     name = serializers.CharField(required=False, allow_blank=True, default="")
 
     university_id = serializers.CharField(required=False, allow_blank=True)

@@ -43,6 +43,7 @@ class NotificationLog(models.Model):
         AGENT_REPLY = "agent_reply", "Agent Reply"
         PENDING_QUERY_RESOLVED = "pending_query_resolved", "Pending Query Resolved"
         AGENT_INITIATED = "agent_initiated", "Agent Initiated"
+        PROACTIVE_CHECKIN = "proactive_checkin", "Proactive Check-in"
         OTHER = "other", "Other"
 
     class Status(models.TextChoices):

@@ -9,6 +9,7 @@ db.sqlite3-wal
 postman_test.json
 project_flow.md
 uploads/
+celerybeat-schedule*
 profiles/
 memory/
 exports/

@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List
 
 from celery import shared_task
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -94,3 +95,40 @@ def check_push_receipts_task(self, receipt_map: Dict[str, str]) -> None:
             PushToken.objects.filter(token=token_str).update(
                 is_active=False, last_error=receipt.get("message", "")
             )
+
+
+@shared_task
+def run_proactive_checkins_task(cooldown_days: int | None = None) -> Dict[str, int]:
+    """
+    Scheduled scan (see CELERY_BEAT_SCHEDULE in settings.py) that lets the
+    agent reach out on its own: for every student who hasn't been nudged
+    within the cooldown window, check whether their profile has a genuine
+    gap/weakness worth mentioning and, if so, message + push-notify them.
+    """
+    from accounts.models import Account
+    from django_api.models import StudentProfile
+    from notifications.proactive import DEFAULT_COOLDOWN_DAYS, run_checkin_for_student
+
+    if cooldown_days is None:
+        cooldown_days = getattr(settings, "PROACTIVE_CHECKIN_COOLDOWN_DAYS", DEFAULT_COOLDOWN_DAYS)
+
+    # Only students who've actually engaged (have a real Account + have
+    # touched their profile) are candidates -- an empty StudentProfile row
+    # with no name has nothing worth commenting on and no account to reach.
+    student_ids = (
+        StudentProfile.objects.exclude(name="")
+        .filter(student_id__in=Account.objects.values_list("student_id", flat=True))
+        .values_list("student_id", flat=True)
+    )
+
+    sent = 0
+    skipped = 0
+    for student_id in student_ids.iterator():
+        result = run_checkin_for_student(student_id, cooldown_days=cooldown_days)
+        if result is not None:
+            sent += 1
+        else:
+            skipped += 1
+
+    logger.info("run_proactive_checkins_task: sent=%s skipped=%s", sent, skipped)
+    return {"sent": sent, "skipped": skipped}

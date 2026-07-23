@@ -13,6 +13,11 @@ class Account(models.Model):
     class Role(models.TextChoices):
         STUDENT = "student", "Student"
         UNIVERSITY = "university", "University"
+        # High-level operator role for project_superuser -- not selectable via
+        # the public /api/auth/register/ endpoint (see RegisterSerializer),
+        # only created via the create_superuser_account management command or
+        # an existing superuser's /api/superuser/users/create-superuser/.
+        SUPERUSER = "superuser", "Superuser"
 
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="account")
     role = models.CharField(max_length=20, choices=Role.choices)

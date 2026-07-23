@@ -7,5 +7,6 @@ urlpatterns = [
     path("api/verification/", include("verification.urls")),
     path("api/university-admin/", include("universities.urls")),
     path("api/notifications/", include("notifications.urls")),
+    path("api/superuser/", include("project_superuser.urls")),
     path("api/", include("django_api.urls")),
 ]

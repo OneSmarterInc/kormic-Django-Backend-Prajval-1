@@ -47,6 +47,14 @@ class IsStudentOrUniversityRole(BasePermission):
         return account is not None and account.role in (Account.Role.STUDENT, Account.Role.UNIVERSITY)
 
 
+class IsSuperUserRole(BasePermission):
+    message = "This endpoint is only available to superuser accounts."
+
+    def has_permission(self, request, view) -> bool:
+        account = get_account(request)
+        return account is not None and account.role == Account.Role.SUPERUSER
+
+
 class ScopedToOwnStudentId(BasePermission):
     message = "You may only access your own student profile."
 
