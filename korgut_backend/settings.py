@@ -111,15 +111,14 @@ DATABASES = {
 }
 
 
-def _enable_sqlite_wal(sender, connection, **kwargs):
+def _configure_sqlite(sender, connection, **kwargs):
     if connection.vendor != "sqlite":
         return
     with connection.cursor() as cursor:
-        cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA busy_timeout=20000;")
 
 
-connection_created.connect(_enable_sqlite_wal)
+connection_created.connect(_configure_sqlite)
 
 
 # Password validation

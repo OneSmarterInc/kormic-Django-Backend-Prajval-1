@@ -206,32 +206,7 @@ class LoginView(APIView):
 
 
 class TOTPEnrollView(APIView):
-    """
-    Idempotent while enrollment is in progress, and race-safe under two
-    concurrent calls -- both matter, and only fixing one isn't enough:
-
-    A student's authenticator app has already scanned whatever secret this
-    endpoint returns, so a second call must return the exact same secret
-    (idempotent) or the QR just scanned becomes worthless. But a plain
-    "check if a device exists, else create one" is a TOCTOU race under two
-    near-simultaneous calls (a double-submitted form, a retried request --
-    exactly the scenario run_with_retry's own docstring calls out for this
-    same SQLite database): both requests can see "no device yet", both
-    generate a *different* candidate secret, and whichever write commits
-    second silently overwrites the first -- whose secret the frontend
-    already displayed and the user already scanned. Every code their app
-    produces afterward is then checked against a secret it never saw, and
-    verify-enrollment fails with "Invalid TOTP code" no matter what's
-    entered -- intermittently, only when two calls actually raced, which is
-    exactly the "works most of the time, randomly fails" symptom this fixes.
-
-    get_or_create() closes that race at the database level: it relies on
-    the OneToOneField(user) unique constraint, so if two requests really do
-    race, the loser's INSERT fails with IntegrityError and Django
-    transparently re-fetches the winner's row instead -- there is no window
-    where both requests can believe they created the device.
-    """
-
+    
     permission_classes = [IsAuthenticated]
 
     def post(self, request):

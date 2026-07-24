@@ -47,6 +47,9 @@ from django_api.services import (
     format_profile_response,
     get_profile,
     get_profile_image_path,
+    get_priority_tier_bounds,
+    get_priority_tier_counts,
+    get_shortlisted_profiles,
     parse_resume,
     analyze_github,
     analyze_linkedin,
@@ -798,6 +801,31 @@ def agent_chat_history(request):
     })
 
 
+@api_view(["POST"])
+@permission_classes(STUDENT_PERMISSIONS)
+def agent_chat_new(request):
+    """
+    POST /api/chat/agent/new/
+    Starts a new conversation with the student's personal agent: deletes the
+    persisted transcript (what chat/agent/history/ returns) and resets the
+    in-process LangGraph conversation state (pure_multi_agent.runtime's
+    checkpointer), so the next chat/agent/ turn begins with no prior turns
+    in context. Deliberately does not touch AriaMemory or the student's
+    profile -- durable facts learned about the student (GPA, universities
+    discussed, etc.) survive a "new chat" the same way they'd survive the
+    student opening a new tab; only the turn-by-turn conversation resets.
+    """
+    from pure_multi_agent.runtime import reset_conversation
+
+    student_id = request.user.account.student_id
+    deleted_count, _ = ChatMessage.objects.filter(
+        channel=ChatMessage.Channel.AGENT, student_id=student_id
+    ).delete()
+    reset_conversation(student_id)
+
+    return Response({"status": "ok", "student_id": student_id, "messages_deleted": deleted_count})
+
+
 class AssessmentHistoryView(APIView):
     """
     GET /api/assessments/<student_id>/
@@ -1220,18 +1248,64 @@ def serialize_pending_query(query: "PendingQuery") -> Dict[str, Any]:
 class UniversityProfilesListView(APIView):
     """
     GET /api/university/<university_id>/profiles/
-    Dashboard listing of every student profile, with that university's fit
-    assessment (if any) flattened in. Reads from the StudentProfile table.
+    Officer-facing shortlist, not a full student directory: only students who
+    have shown real interest in this university (searched it or run a fit
+    check via their own agent -- see django_api.models.UniversityInterestEvent)
+    AND whose latest fit score clears the university's configured
+    min_fit_score_threshold. See django_api.services.get_shortlisted_profiles.
+    Sorted by match_score descending.
+
+    Every returned profile carries a "priority_tier" (high/medium/low/
+    unranked), computed against the university's configured
+    priority_tier_bounds (default high>=80, medium>=60, low>=40) -- see
+    django_api.services.compute_priority_tier. "tier_counts" in the response
+    tallies every interested+scored student by tier regardless of any tier
+    filter applied, so a dashboard can render filter buttons with counts.
+
+    Optional query params:
+      min_score=<0-100>            Override the university's saved threshold for this request only.
+      include_all_interested=true  Show every interested student regardless of score (same as min_score=0).
+      priority_tier=high,medium     Comma-separated subset of high/medium/low/unranked to show.
     """
 
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
+        raw_priority_tier = request.query_params.get("priority_tier")
+        priority_tiers = None
+        if raw_priority_tier:
+            priority_tiers = {tier.strip().lower() for tier in raw_priority_tier.split(",") if tier.strip()}
+            invalid_tiers = priority_tiers - {"high", "medium", "low", "unranked"}
+            if invalid_tiers:
+                return Response(
+                    {"error": f"Invalid priority_tier value(s): {', '.join(sorted(invalid_tiers))}."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        if request.query_params.get("include_all_interested", "").lower() == "true":
+            min_score = 0
+        else:
+            raw_min_score = request.query_params.get("min_score")
+            if raw_min_score is None:
+                min_score = None
+            else:
+                try:
+                    min_score = max(0, min(100, int(raw_min_score)))
+                except ValueError:
+                    return Response(
+                        {"error": "min_score must be an integer between 0 and 100."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
         profiles = []
 
-        for row in StudentProfile.objects.all():
+        for entry in get_shortlisted_profiles(university_id, min_score=min_score, priority_tiers=priority_tiers):
+            row = StudentProfile.objects.filter(student_id=entry["student_id"]).first()
+            if row is None:
+                continue
+
             data = load_profile_data(row.student_id)
-            assessment = (data.get("assessments") or {}).get(university_id, {})
+            assessment = entry["assessment"]
 
             profiles.append({
                 "profile_id": data.get("student_id"),
@@ -1269,11 +1343,17 @@ class UniversityProfilesListView(APIView):
                 "publications": data.get("publications", []),
                 "match_tier": assessment.get("match_tier", "unassessed"),
                 "match_score": assessment.get("match_score"),
+                "priority_tier": entry["priority_tier"],
                 "fit_summary": assessment.get("fit_summary", data.get("summary", "")),
                 "recommendation": assessment.get("recommendation", "review"),
             })
 
-        return Response({"university_id": university_id, "profiles": profiles})
+        return Response({
+            "university_id": university_id,
+            "priority_tier_bounds": get_priority_tier_bounds(university_id),
+            "tier_counts": get_priority_tier_counts(university_id),
+            "profiles": profiles,
+        })
 
 
 @api_view(["POST"])

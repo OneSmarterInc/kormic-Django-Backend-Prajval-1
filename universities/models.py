@@ -1,7 +1,12 @@
 
 from __future__ import annotations
 
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+
+
+def default_priority_tier_bounds() -> dict:
+    return {"high": 80, "medium": 60, "low": 40}
 
 
 class University(models.Model):
@@ -25,6 +30,22 @@ class University(models.Model):
     eligibility_criteria = models.JSONField(default=list, blank=True)
     # ["https://...", ...] -- same flat shape knowledge.scraper.scrape_university() expects
     scrape_urls = models.JSONField(default=list, blank=True)
+
+    # Officer-tunable pass/fail cutoff (0-100) against FitAssessment.match_score
+    # for the officer-facing shortlist (see django_api.services.get_shortlisted_profiles).
+    # 40 mirrors the "target" tier cutoff used by the deterministic fallback
+    # assessment (agents.commons._fallback_fit_assessment) as a sane default,
+    # but is per-university and officer-editable, not a hardcoded gate.
+    min_fit_score_threshold = models.IntegerField(
+        default=40,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
+
+    # Officer-tunable score bands (0-100) for grouping shortlisted students by
+    # priority -- see django_api.services.compute_priority_tier. Keys are
+    # fixed ("high"/"medium"/"low"); values are the minimum match_score for
+    # each band, editable per university rather than hardcoded.
+    priority_tier_bounds = models.JSONField(default=default_priority_tier_bounds, blank=True)
 
     # -- persona-input fields feeding personas.university_persona_builder --
     tone_descriptors = models.JSONField(default=list, blank=True)

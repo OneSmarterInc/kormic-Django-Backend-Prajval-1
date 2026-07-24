@@ -149,6 +149,39 @@ class ChatHistoryTests(TestCase):
         senders = [m["sender"] for m in history.data["messages"]]
         self.assertEqual(senders, ["user", "assistant", "user", "assistant"])
 
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_new_chat_clears_history_and_conversation_state(self, mock_run_turn):
+        from pure_multi_agent.runtime import _checkpointer
+
+        mock_run_turn.side_effect = [("Nova", "Hi there!")]
+        self.student.post("/api/chat/agent/", {"message": "Hello"}, format="json")
+        self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 2)
+
+        _checkpointer.storage[self.student_id]  # populate a fake checkpoint entry
+        resp = self.student.post("/api/chat/agent/new/")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["messages_deleted"], 2)
+        self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 0)
+        self.assertNotIn(self.student_id, _checkpointer.storage)
+
+    def test_new_chat_does_not_touch_other_students_history(self):
+        other, other_id = make_student_client(email="other-new-chat@example.com")
+        other.post("/api/profile/", {"name": "Other"}, format="json")
+
+        from django_api.models import ChatMessage
+
+        ChatMessage.objects.create(
+            channel=ChatMessage.Channel.AGENT, student_id=self.student_id, sender="user", content="mine"
+        )
+        ChatMessage.objects.create(
+            channel=ChatMessage.Channel.AGENT, student_id=other_id, sender="user", content="theirs"
+        )
+
+        self.student.post("/api/chat/agent/new/")
+
+        self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 0)
+        self.assertEqual(other.get("/api/chat/agent/history/").data["count"], 1)
+
 
 class SubResourceHistoryTests(TestCase):
     def setUp(self):

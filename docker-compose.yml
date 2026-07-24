@@ -1,0 +1,60 @@
+x-app: &app
+  build: .
+  volumes:
+    - .:/app
+  env_file:
+    - .env
+  environment:
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/1
+  depends_on:
+    redis:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+  restart: unless-stopped
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: korgut_redis
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: applies migrations against the same db.sqlite3 the app already
+  # uses (bind-mounted below), then exits. web/worker/beat wait for this to
+  # finish successfully before they start, so schema is always up to date.
+  migrate:
+    build: .
+    container_name: korgut_migrate
+    command: python manage.py migrate --noinput
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+
+  web:
+    <<: *app
+    container_name: korgut_web
+    command: python manage.py runserver 0.0.0.0:8030
+    ports:
+      - "8030:8030"
+
+  celery_worker:
+    <<: *app
+    container_name: korgut_celery_worker
+    command: celery -A korgut_backend worker -l info
+
+  celery_beat:
+    <<: *app
+    container_name: korgut_celery_beat
+    command: celery -A korgut_backend beat -l info
+
+volumes:
+  redis_data:

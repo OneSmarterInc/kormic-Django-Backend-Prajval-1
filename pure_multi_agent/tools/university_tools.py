@@ -38,11 +38,21 @@ def _format_result(result: Dict[str, Any], agent_label: str) -> str:
     trust = result.get("trust", {})
     confidence = trust.get("confidence", {})
 
-    return (
+    prefix = (
         f"[{agent_label} answer, confidence={confidence.get('level', 'unknown')}, "
-        f"needs_verification={confidence.get('needs_verification', True)}]\n"
-        f"{result.get('answer', '')}"
+        f"needs_verification={confidence.get('needs_verification', True)}"
     )
+
+    if result.get("partial_pending"):
+        pending_query = result.get("pending_query", {}) or {}
+        query_id = pending_query.get("query_id", "unknown")
+        topics = ", ".join(result.get("unsupported_topics", []) or [])
+        prefix += (
+            f"; no knowledge base coverage for: {topics} -- pending query "
+            f"#{query_id} was created for a university contact on that part"
+        )
+
+    return f"{prefix}]\n{result.get('answer', '')}"
 
 
 def build_tools(ctx: Dict[str, Any]) -> List[Any]:
@@ -58,9 +68,19 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
     def ask_university(university_id: str, question: str) -> str:
         """Ask one specific university agent (by id, from list_universities) a
         question about that program -- deadlines, requirements, tuition,
-        courses, or anything needing verified/scraped/human-verified
-        knowledge rather than general advising judgment."""
+        courses, leadership/administration (president, principal, dean,
+        department chair), contact info, or anything else needing verified/
+        scraped/human-verified knowledge rather than general advising
+        judgment. Call this before telling the student you don't have an
+        answer or that they should check the university's website/contact
+        it themselves -- whether the fact is documented or not, this is the
+        only call that can find out and the only one that creates a
+        follow-up for the university when it isn't."""
         result = university_graph.ask_one(university_id, question, ctx["student_profile"])
+
+        if result.get("error") != "unknown_university_id":
+            commons.record_university_interest(ctx["canonical_student_id"], university_id, "searched")
+
         agent_label = commons.get_university_agent_label(university_id)
         return _format_result(result, agent_label)
 
@@ -76,6 +96,7 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
             console.print(f"[yellow]Fit assessment failed for {university_id}: {exc}[/yellow]")
             return f"Could not generate a fit assessment for {university_id} right now."
 
+        commons.record_university_interest(ctx["canonical_student_id"], university_id, "fit_check")
         ctx["student_profile"].setdefault("assessments", {})[university_id] = assessment
 
         return (
@@ -95,13 +116,17 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
         from every program (e.g. comparing deadlines or requirements across
         schools). Do not use this for personal-fit comparisons -- use
         get_fit_assessment_for_all_universities for that instead."""
-        results = university_graph.ask_all(question, ctx["student_profile"])
+        target_ids = commons.list_university_ids()
+        results = university_graph.ask_all(question, ctx["student_profile"], university_ids=target_ids)
 
         if not results:
             return "Could not get answers from any university agents for that question."
 
         lines = []
-        for result in results:
+        for university_id, result in zip(target_ids, results):
+            if result.get("error") != "unknown_university_id":
+                commons.record_university_interest(ctx["canonical_student_id"], university_id, "searched")
+
             agent_label = result.get("agent_name", "University Agent")
             university_name = result.get("university", "Unknown University")
             lines.append(f"{agent_label} ({university_name}): {_format_result(result, agent_label)}")
@@ -126,6 +151,8 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
                 except Exception as exc:
                     console.print(f"[yellow]Fit assessment failed for {university_id}: {exc}[/yellow]")
                     continue
+
+            commons.record_university_interest(ctx["canonical_student_id"], university_id, "fit_check")
 
             lines.append(
                 f"- {assessment.get('university', university_id)}: "

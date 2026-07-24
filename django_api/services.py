@@ -547,7 +547,7 @@ def compute_profile_intelligence(profile: Dict[str, Any]) -> Dict[str, Any]:
 
     if overall_score >= 80:
         recommendation = "Highly recommended for ambitious and target universities."
-    elif overall_score >= 65:
+    elif overall_score >= 40:
         recommendation = "Suitable for target universities with a balanced application strategy."
     else:
         recommendation = "Strengthen the profile before applying to competitive universities."
@@ -901,6 +901,130 @@ def analyze_github(student_id: str) -> Dict[str, Any]:
         "skills_added": skills_added,
         "profile": profile,
     }
+
+
+def record_university_interest(student_id: str, university_id: str, source: str) -> None:
+
+    from django_api.models import UniversityInterestEvent
+
+    student_id = make_student_id(student_id)
+    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    if profile is None:
+        return
+
+    UniversityInterestEvent.objects.get_or_create(student=profile, university_id=university_id, source=source)
+
+
+DEFAULT_PRIORITY_TIER_BOUNDS = {"high": 80, "medium": 60, "low": 40}
+
+
+def get_priority_tier_bounds(university_id: str) -> Dict[str, int]:
+    """University's configured priority-tier bounds, per-key-merged over the
+    defaults so a partially-set bounds dict (e.g. only {"high": 85}) still
+    yields usable values for the other bands."""
+    from universities.models import University
+
+    university = University.objects.filter(pk=university_id).first()
+    configured = (university.priority_tier_bounds if university else None) or {}
+    return {**DEFAULT_PRIORITY_TIER_BOUNDS, **configured}
+
+
+def compute_priority_tier(match_score: int, bounds: Dict[str, int]) -> str:
+    """Map a match_score to a priority band using the given bounds (see
+    get_priority_tier_bounds). "unranked" covers interested students who
+    don't clear even the "low" bound."""
+    if match_score >= bounds["high"]:
+        return "high"
+    if match_score >= bounds["medium"]:
+        return "medium"
+    if match_score >= bounds["low"]:
+        return "low"
+    return "unranked"
+
+
+def get_shortlisted_profiles(
+    university_id: str,
+    min_score: Optional[int] = None,
+    priority_tiers: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Students who (a) have shown interest in this university (an
+    UniversityInterestEvent row -- searched it or ran a fit check) and
+    (b) whose latest FitAssessment.match_score meets min_score. min_score
+    defaults to the university's configured min_fit_score_threshold, unless
+    priority_tiers is given without an explicit min_score -- then it defaults
+    to the lowest bound among the requested tiers, so e.g. filtering to
+    priority_tiers=["low"] isn't silently blocked by a stricter default gate.
+    Each result carries a "priority_tier" (high/medium/low/unranked, see
+    compute_priority_tier) so callers can group/filter without recomputing
+    bounds themselves. Sorted by match_score descending. Backs
+    UniversityProfilesListView -- the officer-facing dashboard only ever sees
+    this shortlist, never every StudentProfile row.
+    """
+    from django_api.models import FitAssessment, UniversityInterestEvent
+    from universities.models import University
+
+    bounds = get_priority_tier_bounds(university_id)
+
+    if min_score is None:
+        if priority_tiers:
+            tier_floor = {**bounds, "unranked": 0}
+            min_score = min(tier_floor.get(tier, 0) for tier in priority_tiers)
+        else:
+            university = University.objects.filter(pk=university_id).first()
+            min_score = university.min_fit_score_threshold if university else 40
+
+    interested_student_pks = (
+        UniversityInterestEvent.objects.filter(university_id=university_id)
+
+        .order_by()
+        .values_list("student_id", flat=True)
+        .distinct()
+    )
+
+    shortlisted: List[Dict[str, Any]] = []
+
+    for student_pk in interested_student_pks:
+        assessment_row = (
+            FitAssessment.objects.filter(student_id=student_pk, university_id=university_id)
+            .order_by("-created_at")
+            .first()
+        )
+        if assessment_row is None:
+            continue
+
+        try:
+            match_score = int(assessment_row.assessment.get("match_score"))
+        except (TypeError, ValueError):
+            continue
+
+        if match_score < min_score:
+            continue
+
+        tier = compute_priority_tier(match_score, bounds)
+        if priority_tiers and tier not in priority_tiers:
+            continue
+
+        shortlisted.append({
+            "student_id": assessment_row.student.student_id,
+            "assessment": assessment_row.assessment,
+            "match_score": match_score,
+            "priority_tier": tier,
+        })
+
+    shortlisted.sort(key=lambda item: item["match_score"], reverse=True)
+    return shortlisted
+
+
+def get_priority_tier_counts(university_id: str) -> Dict[str, int]:
+    """Tally of every interested-and-scored student for this university by
+    priority tier, ignoring any score gate (min_score=0) -- lets the officer
+    dashboard show tier filter buttons with counts regardless of which
+    tier(s) are currently selected."""
+    counts = {"high": 0, "medium": 0, "low": 0, "unranked": 0}
+    for entry in get_shortlisted_profiles(university_id, min_score=0):
+        counts[entry["priority_tier"]] += 1
+    return counts
 
 
 def analyze_linkedin(student_id: str, uploaded_images: List[Any]) -> Dict[str, Any]:

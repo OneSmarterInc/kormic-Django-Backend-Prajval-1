@@ -684,15 +684,35 @@ You are a university graduate admissions program agent.
 Answer the student's question using ONLY the available knowledge base context.
 If the answer is not clearly supported, say so and return low confidence.
 
+The question may bundle several distinct topics together (e.g. "what are the
+deadlines and funding" asks about two separate things). Judge each topic on
+its own: it is common for one topic to be well documented while another has
+no supporting knowledge base entries at all. List any such topics in
+"unsupported_topics" -- short labels like "funding" or "GRE waiver policy" --
+even if your overall confidence is high because the *other* topics are
+well supported. Do not let a strong answer on one topic hide silence on
+another.
+
+If there are unsupported_topics, answer the parts you can from the
+knowledge base, then add ONE short closing line naming that university and
+inviting the student to contact it directly for the missing topic(s) --
+e.g. "For funding details, contact {self.persona['name']} directly." Do not
+write a multi-step checklist of exactly what to ask, do not add your own
+advice about the student's finances or plans, and do not restate the
+university's contact process at length -- a human follow-up is being
+flagged separately, so one short sentence is enough.
+
 Return ONLY valid JSON. No markdown.
 
 Format:
 {{
   "answer": "your answer here",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "unsupported_topics": []
 }}
 
-Confidence Guide:
+Confidence Guide (for the topics you DID answer -- an unsupported topic
+listed separately doesn't need to drag this down):
 1.0 = Answer explicitly exists in the knowledge base.
 0.8 = Strongly supported by the knowledge base.
 0.6 = Reasonable inference.
@@ -727,16 +747,23 @@ STUDENT:
                 {
                     "answer": raw,
                     "confidence": 0.0,
+                    "unsupported_topics": [],
                 },
             )
 
             answer_text = str(parsed.get("answer", "")).strip()
             confidence = float(parsed.get("confidence", 0.0) or 0.0)
+            unsupported_topics = [
+                str(topic).strip()
+                for topic in (parsed.get("unsupported_topics") or [])
+                if str(topic or "").strip()
+            ]
 
         except Exception as exc:
             console.print(f"[yellow]University answer generation failed: {exc}[/yellow]")
             answer_text = "I could not generate an answer from the available university knowledge."
             confidence = 0.0
+            unsupported_topics = []
 
         if not results:
             failure_reason = "No matching knowledge found in the knowledge base."
@@ -780,7 +807,7 @@ STUDENT:
             confidence=confidence,
         )
 
-        return {
+        result = {
             "university": self.persona["name"],
             "agent_name": self.persona["agent_name"],
             "answer": answer_text,
@@ -789,6 +816,25 @@ STUDENT:
             "trust": trust,
             "kb_size": self.kb.stats()["total_entries"],
         }
+
+        # The overall confidence above only reflects the topics that WERE
+        # supported -- a compound question can clear MIN_CONFIDENCE on
+        # deadlines alone while funding has zero knowledge base coverage.
+        # That gap must still reach the university as a real follow-up
+        # instead of being silently absorbed into "confidence: 0.8".
+        if unsupported_topics:
+            pending_query = self.create_pending_query(
+                question=f"{question} (specifically: {', '.join(unsupported_topics)})",
+                student_context=student_context,
+                failure_reason=(
+                    "No knowledge base coverage for: " + ", ".join(unsupported_topics)
+                ),
+            )
+            result["partial_pending"] = True
+            result["pending_query"] = pending_query
+            result["unsupported_topics"] = unsupported_topics
+
+        return result
 
     # --------------------------------------------------
     # Status / assessment

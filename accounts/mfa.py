@@ -4,11 +4,6 @@ import uuid
 
 from django.core.cache import cache
 
-# django's default LocMemCache backend is per-process, which is fine for a
-# single `manage.py runserver` process. Running this behind multiple worker
-# processes (gunicorn -w N) would need a shared cache (e.g. Redis) instead,
-# since mfa_token/lockout state wouldn't be visible across workers.
-
 MFA_TOKEN_TTL = 300  # seconds
 TOTP_MAX_ATTEMPTS = 5
 TOTP_LOCKOUT_TTL = 300  # seconds

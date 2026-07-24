@@ -32,6 +32,11 @@ urlpatterns = [
     path("chat/intake/", views.profile_intake_chat, name="profile-intake-chat"),
     path("chat/agent/", views.agent_chat, name="agent-chat"),
     path("chat/agent/history/", views.agent_chat_history, name="agent-chat-history"),
+    # "New chat" and "clear chat" are the same action here -- there's no
+    # multi-thread concept per student, so starting fresh always means
+    # wiping the one conversation there is. Kept as a single canonical
+    # endpoint rather than two aliases that could quietly drift apart.
+    path("chat/agent/new/", views.agent_chat_new, name="agent-chat-new"),
 
     # Fit assessment history is read-only now -- generation happens only via
     # agent_chat (agents.commons.generate_fit_assessment), never a direct POST.

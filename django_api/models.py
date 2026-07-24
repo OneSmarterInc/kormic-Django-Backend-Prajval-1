@@ -220,6 +220,40 @@ class FitAssessment(models.Model):
         return f"FitAssessment({self.student.student_id}, {self.university_id})"
 
 
+class UniversityInterestEvent(models.Model):
+    """
+    Signal that a student has actually engaged with a specific university --
+    asked it a question, or had a fit assessment run for it -- rather than
+    the officer's own dashboard lookups (which must never write here, since
+    that would make "interest" reflect officer curiosity instead of student
+    intent). Feeds UniversityProfilesListView's shortlist: a student with no
+    row here for a given university_id never appears in that university's
+    officer-facing profile list, regardless of fit score.
+    """
+
+    class Source(models.TextChoices):
+        SEARCHED = "searched", "Searched"
+        FIT_CHECK = "fit_check", "Fit Check"
+
+    student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="university_interest_events")
+    university_id = models.CharField(max_length=255, db_index=True)
+    source = models.CharField(max_length=20, choices=Source.choices)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["university_id", "student"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["student", "university_id", "source"],
+                name="unique_university_interest_event_per_source",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"UniversityInterestEvent({self.student.student_id}, {self.university_id}, {self.source})"
+
+
 class RoadmapVersion(models.Model):
     student = models.ForeignKey(StudentProfile, on_delete=models.CASCADE, related_name="roadmap_versions")
     request_message = models.TextField(blank=True, default="")

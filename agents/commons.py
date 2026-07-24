@@ -264,7 +264,7 @@ def _fallback_fit_assessment(profile: Dict[str, Any], university_id: str, agent:
         match_tier = "strong"
         recommendation = "recommend"
         realistic = True
-    elif score >= 65:
+    elif score >= 40:
         match_tier = "target"
         recommendation = "recommend"
         realistic = True
@@ -352,6 +352,12 @@ def generate_fit_assessment(student_id: str, university_id: str, force: bool = F
     response_data["generated_at"] = row.created_at.isoformat()
 
     return response_data
+
+
+def record_university_interest(student_id: str, university_id: str, source: str) -> None:
+    from django_api.services import record_university_interest as _record_university_interest
+
+    _record_university_interest(student_id, university_id, source)
 
 
 # ---------------------------------------------------------------------

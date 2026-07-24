@@ -137,13 +137,13 @@ def _confidence_level(score: float, high_risk: bool) -> str:
     if high_risk:
         if score >= 0.9:
             return "High"
-        if score >= 0.65:
+        if score >= 0.40:
             return "Medium"
         return "Low"
 
     if score >= 0.85:
         return "High"
-    if score >= 0.65:
+    if score >= 0.40:
         return "Medium"
     return "Low"
 

@@ -38,6 +38,12 @@ _PATCHABLE_PROFILE_FIELDS = _KB_SYNCED_FIELDS | {
     "never_do_notes",
 }
 
+# Handled separately from _PATCHABLE_PROFILE_FIELDS since they need
+# int/shape validation rather than a plain setattr.
+_MIN_FIT_SCORE_THRESHOLD_FIELD = "min_fit_score_threshold"
+_PRIORITY_TIER_BOUNDS_FIELD = "priority_tier_bounds"
+_PRIORITY_TIER_KEYS = {"high", "medium", "low"}
+
 
 def _error(message: str, http_status=status.HTTP_400_BAD_REQUEST) -> Response:
     return Response({"status": "error", "message": str(message)}, status=http_status)
@@ -64,6 +70,8 @@ def _serialize_profile(university: University) -> Dict[str, Any]:
         "admissions_office_address": university.admissions_office_address,
         "eligibility_criteria": university.eligibility_criteria,
         "scrape_urls": university.scrape_urls,
+        "min_fit_score_threshold": university.min_fit_score_threshold,
+        "priority_tier_bounds": university.priority_tier_bounds,
         "tone_descriptors": university.tone_descriptors,
         "best_fit_notes": university.best_fit_notes,
         "not_best_fit_notes": university.not_best_fit_notes,
@@ -110,6 +118,29 @@ class UniversityProfileAPIView(APIView):
 
         data = request.data or {}
         changed_kb_fields = False
+
+        if _MIN_FIT_SCORE_THRESHOLD_FIELD in data:
+            try:
+                threshold = int(data[_MIN_FIT_SCORE_THRESHOLD_FIELD])
+            except (TypeError, ValueError):
+                return _error("min_fit_score_threshold must be an integer between 0 and 100.")
+            if not 0 <= threshold <= 100:
+                return _error("min_fit_score_threshold must be an integer between 0 and 100.")
+            university.min_fit_score_threshold = threshold
+
+        if _PRIORITY_TIER_BOUNDS_FIELD in data:
+            bounds = data[_PRIORITY_TIER_BOUNDS_FIELD]
+            if not isinstance(bounds, dict) or set(bounds.keys()) != _PRIORITY_TIER_KEYS:
+                return _error("priority_tier_bounds must be an object with exactly 'high', 'medium', 'low' keys.")
+            try:
+                bounds = {key: int(value) for key, value in bounds.items()}
+            except (TypeError, ValueError):
+                return _error("priority_tier_bounds values must be integers between 0 and 100.")
+            if not all(0 <= value <= 100 for value in bounds.values()):
+                return _error("priority_tier_bounds values must be integers between 0 and 100.")
+            if not (bounds["high"] >= bounds["medium"] >= bounds["low"]):
+                return _error("priority_tier_bounds must satisfy high >= medium >= low.")
+            university.priority_tier_bounds = bounds
 
         for field in _PATCHABLE_PROFILE_FIELDS:
             if field not in data:

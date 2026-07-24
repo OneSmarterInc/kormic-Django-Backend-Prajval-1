@@ -119,6 +119,22 @@ def _extract_reply_text(result: Dict[str, Any]) -> str:
     return str(content)
 
 
+def reset_conversation(student_id: str) -> None:
+    """
+    Wipe this student's in-process LangGraph conversational state (the
+    `messages` checkpoint), so the next run_turn starts with no prior turns
+    in context -- i.e. a genuine "new chat", not just a cleared-looking
+    transcript that still secretly informs the next reply. Callers also need
+    to delete the student's persisted ChatMessage rows (the visible
+    history) separately; this only clears the short-term turn-to-turn state
+    kept here in _checkpointer.
+    """
+    from django_api.services import make_student_id
+
+    key = make_student_id(student_id)
+    _checkpointer.delete_thread(key)
+
+
 def run_turn(student_id: str, message: str) -> tuple[str, str]:
     ctx = _load_context(student_id)
 
