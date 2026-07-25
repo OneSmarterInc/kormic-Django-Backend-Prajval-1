@@ -15,7 +15,6 @@ from datetime import timedelta
 from pathlib import Path
 
 from celery.schedules import crontab
-from django.db.backends.signals import connection_created
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -97,28 +96,14 @@ WSGI_APPLICATION = 'korgut_backend.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        # SQLite only allows one writer at a time. Without a busy timeout,
-        # two requests that both try to write within the same instant (e.g.
-        # a double-submitted /totp/enroll/ call) make the loser fail
-        # immediately with "database is locked" instead of just waiting a
-        # moment for the first write to finish.
-        'OPTIONS': {
-            'timeout': 20,
-        },
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'kormic'),
+        'USER': os.environ.get('POSTGRES_USER', 'kormic'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'kormic'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
-
-
-def _configure_sqlite(sender, connection, **kwargs):
-    if connection.vendor != "sqlite":
-        return
-    with connection.cursor() as cursor:
-        cursor.execute("PRAGMA busy_timeout=20000;")
-
-
-connection_created.connect(_configure_sqlite)
 
 
 # Password validation

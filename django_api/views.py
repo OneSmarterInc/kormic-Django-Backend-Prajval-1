@@ -1046,7 +1046,7 @@ class PendingQueriesView(APIView):
     def get(self, request):
         own_university_id = request.user.account.university_id
         rows = PendingQuery.objects.filter(university_id=own_university_id).exclude(
-            status=PendingQuery.Status.RESOLVED
+            status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED]
         )
 
         pending_queries = [
@@ -1526,18 +1526,23 @@ class UniversityActiveQueriesView(APIView):
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        rows = PendingQuery.objects.filter(university_id=university_id).exclude(status=PendingQuery.Status.RESOLVED)
+        rows = PendingQuery.objects.filter(university_id=university_id).exclude(
+            status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED]
+        )
         active = [serialize_pending_query(r) for r in rows]
         return Response({"university_id": university_id, "queries": active})
 
 
 class UniversityArchiveQueriesView(APIView):
-    """GET /api/university/<university_id>/queries/archive/ — resolved/answered only."""
+    """GET /api/university/<university_id>/queries/archive/ — resolved or ignored (i.e. no longer active)."""
 
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        rows = PendingQuery.objects.filter(university_id=university_id, status=PendingQuery.Status.RESOLVED)
+        rows = PendingQuery.objects.filter(
+            university_id=university_id,
+            status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED],
+        )
         archive = [serialize_pending_query(r) for r in rows]
         return Response({"university_id": university_id, "queries": archive})
 
@@ -1620,3 +1625,89 @@ class EditPendingQueryView(APIView):
                 {"status": "failed", "message": "Failed to update query answer.", "error": str(exc)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class IgnorePendingQueryView(APIView):
+    """
+    POST /api/queries/<query_id>/ignore/
+    Soft-dismisses a query (e.g. a duplicate, spam, or something already
+    handled outside the system) without providing a real answer -- unlike
+    /api/queries/answer/, which requires one and marks the query resolved.
+    The row (and the student's original question) stays in the database for
+    history/audit; it just drops out of the active pending list. An officer
+    can still answer it normally later via /api/queries/answer/ or
+    /api/queries/<id>/edit/, which will move it out of "ignored" the same
+    way any other status transition would.
+    """
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole]
+
+    def post(self, request, query_id: int):
+        from django.utils import timezone
+
+        reason = request.data.get("reason", "")
+        ignored_by = request.data.get("ignored_by", "Admin")
+
+        selected_query = PendingQuery.objects.filter(id=query_id).first()
+
+        if not selected_query:
+            return Response(
+                {"status": "failed", "message": f"Query not found for query_id: {query_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        university_id = selected_query.university_id
+        if university_id and university_id != request.user.account.university_id:
+            return Response(
+                {"status": "failed", "message": "You may only ignore queries for your own university."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if selected_query.status == PendingQuery.Status.RESOLVED:
+            return Response(
+                {"status": "failed", "message": f"Query {query_id} is already resolved."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        selected_query.status = PendingQuery.Status.IGNORED
+        selected_query.answer = reason
+        selected_query.answered_by = ignored_by
+        selected_query.answered_at = timezone.now()
+        selected_query.save()
+
+        return Response(
+            {"status": "success", "message": "Query ignored", "query_id": query_id, "university_id": university_id},
+            status=status.HTTP_200_OK,
+        )
+
+
+class DeletePendingQueryView(APIView):
+    """
+    DELETE /api/queries/<query_id>/
+    Permanently removes a query row -- for spam, test data, or anything
+    that shouldn't exist at all, as opposed to /api/queries/<id>/ignore/,
+    which dismisses a real query while keeping its record. There is no
+    undo; prefer ignore/ for anything worth keeping a history of.
+    """
+
+    permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole]
+
+    def delete(self, request, query_id: int):
+        selected_query = PendingQuery.objects.filter(id=query_id).first()
+
+        if not selected_query:
+            return Response(
+                {"status": "failed", "message": f"Query not found for query_id: {query_id}"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        university_id = selected_query.university_id
+        if university_id and university_id != request.user.account.university_id:
+            return Response(
+                {"status": "failed", "message": "You may only delete queries for your own university."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        selected_query.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

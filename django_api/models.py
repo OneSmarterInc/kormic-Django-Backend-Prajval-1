@@ -315,6 +315,7 @@ class PendingQuery(models.Model):
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
         RESOLVED = "resolved", "Resolved"
+        IGNORED = "ignored", "Ignored"
 
     class Priority(models.TextChoices):
         NORMAL = "normal", "Normal"
@@ -343,6 +344,8 @@ class PendingQuery(models.Model):
     def display_status(self) -> str:
         if self.status == self.Status.RESOLVED:
             return "answered"
+        if self.status == self.Status.IGNORED:
+            return "ignored"
         return "urgent" if self.priority == self.Priority.URGENT else "pending"
 
     def __str__(self) -> str:

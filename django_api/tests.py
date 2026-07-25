@@ -52,6 +52,10 @@ def make_student_client(email="student_a@example.com"):
 
 
 def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs"):
+    from universities.models import University
+
+    University.objects.get_or_create(id=university_id, defaults={"name": university_id})
+
     client = APIClient()
     _register_and_enroll(client, role="university", email=email, university_id=university_id)
     return client

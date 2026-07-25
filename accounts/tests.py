@@ -26,6 +26,8 @@ def register(client, **overrides):
 
 
 def register_university(client, **overrides):
+    from universities.models import University
+
     payload = {
         "email": "officer1@wsu.edu",
         "password": "S3curePassw0rd!",
@@ -34,6 +36,11 @@ def register_university(client, **overrides):
         "name": "Officer One",
     }
     payload.update(overrides)
+
+    university_id = payload["university_id"]
+    if university_id == "wright_state_cs":
+        University.objects.get_or_create(id=university_id, defaults={"name": university_id})
+
     return client.post("/api/auth/register/", payload, format="json")
 
 

@@ -459,8 +459,9 @@ STUDENT CONTEXT:
 
         question_norm = self._normalize_text(question)
 
+
         active_queries = PendingQuery.objects.filter(university_id=self.university_id).exclude(
-            status=PendingQuery.Status.RESOLVED
+            status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED]
         )
 
         for query in active_queries:
@@ -538,7 +539,7 @@ STUDENT CONTEXT:
         active_queries = [
             self._serialize_pending_query(query)
             for query in PendingQuery.objects.filter(university_id=self.university_id).exclude(
-                status=PendingQuery.Status.RESOLVED
+                status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED]
             )
         ]
 

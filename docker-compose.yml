@@ -7,8 +7,15 @@ x-app: &app
   environment:
     CELERY_BROKER_URL: redis://redis:6379/0
     CELERY_RESULT_BACKEND: redis://redis:6379/1
+    POSTGRES_DB: kormic
+    POSTGRES_USER: kormic
+    POSTGRES_PASSWORD: kormic
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
   depends_on:
     redis:
+      condition: service_healthy
+    postgres:
       condition: service_healthy
     migrate:
       condition: service_completed_successfully
@@ -27,9 +34,27 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # One-shot: applies migrations against the same db.sqlite3 the app already
-  # uses (bind-mounted below), then exits. web/worker/beat wait for this to
-  # finish successfully before they start, so schema is always up to date.
+  postgres:
+    image: postgres:16-alpine
+    container_name: kormic_postgres
+    environment:
+      POSTGRES_DB: kormic
+      POSTGRES_USER: kormic
+      POSTGRES_PASSWORD: kormic
+    ports:
+      - "5438:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kormic -d kormic"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: applies migrations against postgres, then exits. web/worker/beat
+  # wait for this to finish successfully before they start, so schema is
+  # always up to date.
   migrate:
     build: .
     container_name: korgut_migrate
@@ -38,6 +63,15 @@ services:
       - .:/app
     env_file:
       - .env
+    environment:
+      POSTGRES_DB: kormic
+      POSTGRES_USER: kormic
+      POSTGRES_PASSWORD: kormic
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   web:
     <<: *app
@@ -58,3 +92,4 @@ services:
 
 volumes:
   redis_data:
+  postgres_data:

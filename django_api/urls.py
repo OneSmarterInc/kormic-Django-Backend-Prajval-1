@@ -53,6 +53,8 @@ urlpatterns = [
     path("queries/pending/", views.PendingQueriesView.as_view(), name="pending-queries"),
     path("queries/answer/", views.AnswerPendingQueryView.as_view(), name="answer-pending-query"),
     path("queries/<int:query_id>/edit/", views.EditPendingQueryView.as_view(), name="edit-pending-query"),
+    path("queries/<int:query_id>/ignore/", views.IgnorePendingQueryView.as_view(), name="ignore-pending-query"),
+    path("queries/<int:query_id>/", views.DeletePendingQueryView.as_view(), name="delete-pending-query"),
     path("exports/pdf/<str:student_id>/", views.ExportProfilePDFView.as_view(), name="export-profile-pdf"),
 
     # University Dashboard APIs
