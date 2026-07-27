@@ -11,14 +11,18 @@ from django_api.services import make_student_id
 
 
 class RegisterSerializer(serializers.Serializer):
+    """
+    Public self-registration -- students only. University accounts are never
+    self-registered: a superuser creates the single university-admin account
+    via POST /api/superuser/universities/ (see project_superuser.serializers.
+    AdminEnrollUniversitySerializer), and the university then enrolls its own
+    TOTP device on first login just like every other role.
+    """
 
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True)
-    role = serializers.ChoiceField(choices=[Account.Role.STUDENT, Account.Role.UNIVERSITY])
+    role = serializers.ChoiceField(choices=[Account.Role.STUDENT])
     name = serializers.CharField(required=False, allow_blank=True, default="")
-
-    university_id = serializers.CharField(required=False, allow_blank=True)
-    institution_name = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate_email(self, value: str) -> str:
         if User.objects.filter(email__iexact=value).exists():
@@ -30,42 +34,15 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
     def validate(self, attrs):
-        role = attrs["role"]
-
-        if role == Account.Role.STUDENT:
-            student_id = make_student_id(attrs["email"])
-            if Account.objects.filter(student_id=student_id).exists():
-                raise serializers.ValidationError(
-                    {"student_id": "An account derived from this email already exists."}
-                )
-            attrs["student_id"] = student_id
-
-        elif role == Account.Role.UNIVERSITY:
-            from universities.models import University
-
-            university_id = str(attrs.get("university_id") or "").strip()
-            institution_name = str(attrs.get("institution_name") or "").strip()
-
-            if university_id:
-                if not University.objects.filter(pk=university_id).exists():
-                    raise serializers.ValidationError(
-                        {"university_id": f"Unknown university_id: {university_id}"}
-                    )
-            elif not institution_name:
-                raise serializers.ValidationError(
-                    {
-                        "institution_name": (
-                            "Provide institution_name to register a new university, "
-                            "or university_id to join an already-registered one."
-                        )
-                    }
-                )
-
+        student_id = make_student_id(attrs["email"])
+        if Account.objects.filter(student_id=student_id).exists():
+            raise serializers.ValidationError(
+                {"student_id": "An account derived from this email already exists."}
+            )
+        attrs["student_id"] = student_id
         return attrs
 
     def create(self, validated_data) -> User:
-        from universities.services import register_university
-
         email = validated_data["email"]
 
         with transaction.atomic():
@@ -75,21 +52,10 @@ class RegisterSerializer(serializers.Serializer):
                 password=validated_data["password"],
                 first_name=validated_data.get("name", "")[:150],
             )
-
-            university_id = None
-            if validated_data["role"] == Account.Role.UNIVERSITY:
-                existing_id = str(validated_data.get("university_id") or "").strip()
-                if existing_id:
-                    university_id = existing_id
-                else:
-                    university = register_university(validated_data["institution_name"])
-                    university_id = university.id
-
             Account.objects.create(
                 user=user,
-                role=validated_data["role"],
-                student_id=validated_data.get("student_id"),
-                university_id=university_id,
+                role=Account.Role.STUDENT,
+                student_id=validated_data["student_id"],
             )
 
         return user

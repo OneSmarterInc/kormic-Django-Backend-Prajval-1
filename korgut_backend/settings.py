@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'universities',
     'notifications',
     'project_superuser',
+    'url_discovery',
 ]
 
 MIDDLEWARE = [

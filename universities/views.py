@@ -209,6 +209,178 @@ class UniversityAgentNameAPIView(APIView):
         return Response({"agent_name": university.agent_name})
 
 
+class AutoDiscoverUrlsAPIView(APIView):
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def post(self, request):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        try:
+            job = discovery_services.start_discovery(
+                university,
+                max_pages=request.data.get("max_pages"),
+                top_n=request.data.get("top_n"),
+                auto_apply=bool(request.data.get("auto_apply", True)),
+            )
+        except ValueError as exc:
+            return _error(str(exc), status.HTTP_409_CONFLICT)
+        return Response(discovery_services.serialize_job(job), status=status.HTTP_202_ACCEPTED)
+
+    def get(self, request):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        job = university.discovery_jobs.first()
+        if job is None:
+            return _error("No discovery job has been run yet.", status.HTTP_404_NOT_FOUND)
+        return Response(discovery_services.serialize_job(job))
+
+
+class AutoDiscoverJobDetailAPIView(APIView):
+    """
+    GET /api/university-admin/scrape-urls/auto-discover/<job_id>/
+    Status/progress for one discovery job, for polling while it runs.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        return Response(discovery_services.serialize_job(job))
+
+
+class AutoDiscoverJobStopAPIView(APIView):
+    """
+    POST /api/university-admin/scrape-urls/auto-discover/<job_id>/stop/
+    Cooperatively stops an in-progress crawl (checked between page fetches).
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def post(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        try:
+            job = discovery_services.request_stop(job)
+        except ValueError as exc:
+            return _error(str(exc), status.HTTP_409_CONFLICT)
+        return Response(discovery_services.serialize_job(job))
+
+
+class AutoDiscoverResultsAPIView(APIView):
+    """
+    GET /api/university-admin/scrape-urls/auto-discover/<job_id>/results/
+        ?mode=student_essential (default) | base_important | all
+        &limit=15
+    Ranked candidate URLs from a discovery job -- the officer reviews these
+    and picks which ones to apply. Available as soon as the job has crawled
+    any pages; doesn't require it to be complete. limit caps how many are
+    returned (defaults to the job's top_n for student_essential/base_important;
+    ignored for mode=all).
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        mode = request.query_params.get("mode", "student_essential")
+        limit_param = request.query_params.get("limit")
+        try:
+            limit = int(limit_param) if limit_param else None
+        except ValueError:
+            return _error("limit must be an integer.")
+
+        if mode == "all":
+            records = list(
+                job.urls.filter(decision_status__in=["relevant", "review"]).order_by("-relevance_score")
+            )
+            if limit:
+                records = records[:limit]
+        elif mode in {"student_essential", "base_important"}:
+            records = discovery_services.recommended_urls(job, mode=mode, limit=limit)
+        else:
+            return _error("mode must be one of: student_essential, base_important, all.")
+
+        already_saved = set(university.scrape_urls or [])
+        return Response({
+            "job": discovery_services.serialize_job(job),
+            "mode": mode,
+            "results": [
+                discovery_services.serialize_discovered_url(record, already_saved) for record in records
+            ],
+        })
+
+
+class AutoDiscoverApplyAPIView(APIView):
+    """
+    POST /api/university-admin/scrape-urls/auto-discover/<job_id>/apply/
+        Body: {"urls": ["https://...", ...], "replace": false}
+    Merges officer-selected discovered URLs into University.scrape_urls --
+    the same field PUT /scrape-urls/ edits, so manually-typed URLs are kept
+    unless replace=true is explicitly passed. Scraping itself is unchanged:
+    POST /scrape-urls/scrape-now/ still does the actual fact extraction.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def post(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        urls = request.data.get("urls")
+        if not isinstance(urls, list) or not urls:
+            return _error("urls must be a non-empty list of URL strings.")
+
+        from url_discovery import services as discovery_services
+
+        try:
+            merged = discovery_services.apply_selected_urls(
+                university, job, urls, replace=bool(request.data.get("replace", False))
+            )
+        except ValueError as exc:
+            return _error(str(exc))
+        return Response({"scrape_urls": merged})
+
+
 class ScrapeUrlsAPIView(APIView):
     """
     GET /api/university-admin/scrape-urls/

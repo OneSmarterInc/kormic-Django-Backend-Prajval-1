@@ -126,16 +126,20 @@ class AdminCreateSuperuserSerializer(serializers.Serializer):
 
 
 class AdminEnrollUniversitySerializer(serializers.Serializer):
-    """Registers a new University (mirrors universities.services.register_university)
-    and, optionally, the officer login that manages it -- one call instead of
-    the two-step register_university + /api/auth/register/ flow a university
-    would normally do for itself."""
+    """The only way a university gets onto the platform: a superuser
+    registers the University (mirrors universities.services.register_university)
+    together with its one admin login, in a single call. There is no
+    self-registration path and no separate "officer" concept -- exactly one
+    Account (role=university) is created here. TOTP enrollment is
+    deliberately NOT done here: the university completes that itself the
+    first time it logs in with the email/password the superuser hands it,
+    the same must_enroll_totp flow every other role goes through."""
 
     institution_name = serializers.CharField()
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+    name = serializers.CharField(required=False, allow_blank=True, default="")
     profile = serializers.DictField(required=False, default=dict)
-    officer_email = serializers.EmailField(required=False, allow_blank=True, default="")
-    officer_password = serializers.CharField(required=False, allow_blank=True, write_only=True, default="")
-    officer_name = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate_institution_name(self, value: str) -> str:
         value = value.strip()
@@ -143,21 +147,14 @@ class AdminEnrollUniversitySerializer(serializers.Serializer):
             raise serializers.ValidationError("institution_name cannot be blank.")
         return value
 
-    def validate(self, attrs):
-        email = attrs.get("officer_email", "").strip()
-        password = attrs.get("officer_password", "")
+    def validate_email(self, value: str) -> str:
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return value
 
-        if bool(email) != bool(password):
-            raise serializers.ValidationError(
-                {"officer_email": "officer_email and officer_password must be provided together."}
-            )
-
-        if email:
-            if User.objects.filter(email__iexact=email).exists():
-                raise serializers.ValidationError({"officer_email": "An account with this email already exists."})
-            validate_password(password)
-
-        return attrs
+    def validate_password(self, value: str) -> str:
+        validate_password(value)
+        return value
 
     def create(self, validated_data):
         # Lazy import: mirrors accounts.serializers.RegisterSerializer, which
@@ -184,14 +181,13 @@ class AdminEnrollUniversitySerializer(serializers.Serializer):
             if changed_kb_fields:
                 sync_profile_facts_to_kb(university)
 
-            officer_email = validated_data.get("officer_email", "").strip()
-            if officer_email:
-                officer = User.objects.create_user(
-                    username=officer_email,
-                    email=officer_email,
-                    password=validated_data["officer_password"],
-                    first_name=validated_data.get("officer_name", "")[:150],
-                )
-                Account.objects.create(user=officer, role=Account.Role.UNIVERSITY, university_id=university.id)
+            email = validated_data["email"]
+            admin_user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=validated_data["password"],
+                first_name=validated_data.get("name", "")[:150],
+            )
+            Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university_id=university.id)
 
         return university

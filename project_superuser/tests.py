@@ -108,13 +108,13 @@ class SuperuserUniversityAPITests(TestCase):
         _reset_inprocess_agent_caches()
         self.admin = make_superuser_client()
 
-    def test_admin_can_enroll_university_with_officer(self):
+    def test_admin_can_enroll_university_with_admin_account(self):
         resp = self.admin.post(
             "/api/superuser/universities/",
             {
                 "institution_name": "Test University",
-                "officer_email": "officer_new@example.com",
-                "officer_password": "S3curePassw0rd!",
+                "email": "admin_new@example.com",
+                "password": "S3curePassw0rd!",
             },
             format="json",
         )
@@ -122,23 +122,47 @@ class SuperuserUniversityAPITests(TestCase):
         university_id = resp.data["id"]
         self.assertTrue(University.objects.filter(pk=university_id).exists())
         self.assertTrue(Account.objects.filter(university_id=university_id, role=Account.Role.UNIVERSITY).exists())
+        self.assertEqual(resp.data["officer_count"], 1)
 
-    def test_enroll_without_officer_creates_bare_university(self):
+    def test_enroll_university_requires_admin_credentials(self):
         resp = self.admin.post(
             "/api/superuser/universities/",
             {"institution_name": "Bare University"},
             format="json",
         )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(University.objects.filter(name="Bare University").exists())
+
+    def test_new_university_admin_must_enroll_own_totp(self):
+        # The superuser only creates the login -- TOTP enrollment happens
+        # self-serve, on the university's own first login.
+        resp = self.admin.post(
+            "/api/superuser/universities/",
+            {
+                "institution_name": "Self Enroll University",
+                "email": "self_enroll_admin@example.com",
+                "password": "S3curePassw0rd!",
+            },
+            format="json",
+        )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data["officer_count"], 0)
+
+        login_resp = APIClient().post(
+            "/api/auth/login/",
+            {"email": "self_enroll_admin@example.com", "password": "S3curePassw0rd!"},
+            format="json",
+        )
+        self.assertEqual(login_resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(login_resp.data["must_enroll_totp"])
+        self.assertEqual(login_resp.data["user"]["role"], "university")
 
     def test_cannot_delete_university_with_active_officers(self):
         resp = self.admin.post(
             "/api/superuser/universities/",
             {
                 "institution_name": "Guarded University",
-                "officer_email": "guard_officer@example.com",
-                "officer_password": "S3curePassw0rd!",
+                "email": "guard_admin@example.com",
+                "password": "S3curePassw0rd!",
             },
             format="json",
         )
@@ -151,7 +175,11 @@ class SuperuserUniversityAPITests(TestCase):
     def test_patch_updates_profile_fields(self):
         resp = self.admin.post(
             "/api/superuser/universities/",
-            {"institution_name": "Patchable University"},
+            {
+                "institution_name": "Patchable University",
+                "email": "patchable_admin@example.com",
+                "password": "S3curePassw0rd!",
+            },
             format="json",
         )
         university_id = resp.data["id"]

@@ -24,11 +24,7 @@ def _reset_inprocess_agent_caches():
     agents_commons._profile_presenters.clear()
 
 
-def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):
-    payload = {"email": email, "password": password, "role": role, "name": "Test User"}
-    payload.update(extra)
-    client.post("/api/auth/register/", payload, format="json")
-
+def _enroll_totp_and_get_tokens(client, *, email, password="S3curePassw0rd!"):
     access = client.post("/api/auth/login/", {"email": email, "password": password}, format="json").data["access"]
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     secret = client.post("/api/auth/totp/enroll/").data["secret"]
@@ -45,19 +41,43 @@ def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **e
     return tokens
 
 
+def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **extra):
+    payload = {"email": email, "password": password, "role": role, "name": "Test User"}
+    payload.update(extra)
+    client.post("/api/auth/register/", payload, format="json")
+    return _enroll_totp_and_get_tokens(client, email=email, password=password)
+
+
 def make_student_client(email="student_a@example.com"):
     client = APIClient()
     _register_and_enroll(client, role="student", email=email)
     return client, make_student_id(email)
 
 
-def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs"):
+def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs", password="S3curePassw0rd!"):
+    """
+    Universities can no longer self-register (see accounts.serializers.
+    RegisterSerializer) -- only a superuser can create the single admin
+    account for a university, via POST /api/superuser/universities/. Tests
+    provision that fixture directly instead of going through the superuser
+    HTTP API, since most callers only care about a ready-to-use university
+    client and a deterministic university_id.
+    """
+    from django.contrib.auth.models import User
+
+    from accounts.models import Account
+    from universities.identity import ensure_agent_name
     from universities.models import University
 
-    University.objects.get_or_create(id=university_id, defaults={"name": university_id})
+    university, _created = University.objects.get_or_create(id=university_id, defaults={"name": university_id})
+    ensure_agent_name(university)
+
+    if not Account.objects.filter(university_id=university_id, role=Account.Role.UNIVERSITY).exists():
+        admin_user = User.objects.create_user(username=email, email=email, password=password)
+        Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university_id=university_id)
 
     client = APIClient()
-    _register_and_enroll(client, role="university", email=email, university_id=university_id)
+    _enroll_totp_and_get_tokens(client, email=email, password=password)
     return client
 
 

@@ -165,11 +165,14 @@ class AdminUniversityListCreateAPIView(APIView):
     POST /api/superuser/universities/  Body:
         {
           "institution_name": "...",
-          "profile": {...any of ADMIN_PATCHABLE_UNIVERSITY_FIELDS...},
-          "officer_email": "...", "officer_password": "...", "officer_name": "..."
+          "email": "...", "password": "...", "name": "...",
+          "profile": {...any of ADMIN_PATCHABLE_UNIVERSITY_FIELDS...}
         }
-    officer_email/officer_password are optional -- omit them to enroll just
-    the University record and create the officer login separately later.
+    Creates the University plus its one admin login in a single call --
+    email/password/institution_name are required; there is no bare-university
+    (no-login) or multi-officer path. `name` is the admin's own name; `profile`
+    carries basic info (location, contacts, description, etc). The university
+    enrolls its own TOTP device on first login, same as every other role.
     """
 
     permission_classes = SUPERUSER_PERMISSIONS

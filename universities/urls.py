@@ -12,6 +12,31 @@ urlpatterns = [
     path("agent-name/", views.UniversityAgentNameAPIView.as_view(), name="university-admin-agent-name"),
     path("scrape-urls/", views.ScrapeUrlsAPIView.as_view(), name="university-admin-scrape-urls"),
     path("scrape-urls/scrape-now/", views.ScrapeNowAPIView.as_view(), name="university-admin-scrape-now"),
+    path(
+        "scrape-urls/auto-discover/",
+        views.AutoDiscoverUrlsAPIView.as_view(),
+        name="university-admin-auto-discover",
+    ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/",
+        views.AutoDiscoverJobDetailAPIView.as_view(),
+        name="university-admin-auto-discover-detail",
+    ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/stop/",
+        views.AutoDiscoverJobStopAPIView.as_view(),
+        name="university-admin-auto-discover-stop",
+    ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/results/",
+        views.AutoDiscoverResultsAPIView.as_view(),
+        name="university-admin-auto-discover-results",
+    ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/apply/",
+        views.AutoDiscoverApplyAPIView.as_view(),
+        name="university-admin-auto-discover-apply",
+    ),
     path("knowledge/", views.KnowledgeFactListCreateAPIView.as_view(), name="university-admin-knowledge"),
     path(
         "knowledge/sections/",

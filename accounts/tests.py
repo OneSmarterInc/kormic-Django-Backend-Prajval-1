@@ -25,25 +25,6 @@ def register(client, **overrides):
     return client.post("/api/auth/register/", payload, format="json")
 
 
-def register_university(client, **overrides):
-    from universities.models import University
-
-    payload = {
-        "email": "officer1@wsu.edu",
-        "password": "S3curePassw0rd!",
-        "role": "university",
-        "university_id": "wright_state_cs",
-        "name": "Officer One",
-    }
-    payload.update(overrides)
-
-    university_id = payload["university_id"]
-    if university_id == "wright_state_cs":
-        University.objects.get_or_create(id=university_id, defaults={"name": university_id})
-
-    return client.post("/api/auth/register/", payload, format="json")
-
-
 def login(client, email=STUDENT_EMAIL, password="S3curePassw0rd!"):
     return client.post("/api/auth/login/", {"email": email, "password": password}, format="json")
 
@@ -73,14 +54,16 @@ class AuthFlowTests(TestCase):
         self.assertEqual(resp.data["user"]["student_id"], STUDENT_ID)
         self.assertFalse(Account.objects.filter(student_id="someone-elses-id").exists())
 
-    def test_register_university_valid_id_success(self):
-        resp = register_university(self.client)
-        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(Account.objects.get(university_id="wright_state_cs").role, "university")
-
-    def test_register_university_unknown_id_rejected(self):
-        resp = register_university(self.client, university_id="mit_cs", email="officer2@mit.edu")
+    def test_register_endpoint_rejects_university_role(self):
+        # Universities never self-register -- only a superuser can create one,
+        # via POST /api/superuser/universities/.
+        resp = self.client.post(
+            "/api/auth/register/",
+            {"email": "sneaky_officer@wsu.edu", "password": "S3curePassw0rd!", "role": "university"},
+            format="json",
+        )
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Account.objects.filter(role="university").exists())
 
     def test_register_duplicate_email_rejected(self):
         register(self.client)
