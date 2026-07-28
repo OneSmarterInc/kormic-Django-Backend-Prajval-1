@@ -1459,6 +1459,7 @@ def university_agent_chat(request, university_id: str):
                 "trust": result.get("trust"),
                 "pending": result.get("pending", False),
                 "pending_query": result.get("pending_query"),
+                "knowledge_gap": result.get("knowledge_gap", False),
                 "source": result.get("source"),
             },
         )
@@ -1468,6 +1469,8 @@ def university_agent_chat(request, university_id: str):
             "reply": reply,
             "pending": result.get("pending", False),
             "pending_query": result.get("pending_query"),
+            "knowledge_gap": result.get("knowledge_gap", False),
+            "unsupported_topics": result.get("unsupported_topics"),
             "confidence": result.get("confidence"),
             "trust": result.get("trust"),
         })

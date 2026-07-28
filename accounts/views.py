@@ -132,9 +132,13 @@ class RegisterView(APIView):
     throttle_scope = "auth"
 
     def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity
+
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         user = run_with_retry(serializer.save)
+        log_activity(ActivityLog.Action.REGISTERED, actor=user, target_user=user)
 
         # Auto-login on register: hand back the same kind of limited,
         # no-refresh access token LoginView issues for a not-yet-enrolled
@@ -170,6 +174,9 @@ class LoginView(APIView):
     throttle_scope = "auth"
 
     def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity
+
         serializer = LoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -180,9 +187,21 @@ class LoginView(APIView):
         )
 
         if user is None or not user.is_active:
+            # No account, wrong password, or an existing-but-inactive
+            # account -- look the email up regardless so a real account's
+            # failed attempts stay linked to it in the audit trail.
+            existing = User.objects.filter(email__iexact=serializer.validated_data["email"]).first()
+            log_activity(
+                ActivityLog.Action.LOGIN_FAILED,
+                target_user=existing,
+                target_email=serializer.validated_data["email"],
+            )
             return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
 
         if _user_has_confirmed_totp(user):
+            # Password check passed but MFA is still pending -- the login
+            # isn't complete yet, so TOTPLoginVerifyView logs the actual
+            # success/failure once the second factor is checked.
             mfa_token = create_mfa_session(user.id)
             return Response(
                 {
@@ -193,6 +212,10 @@ class LoginView(APIView):
                 },
                 status=status.HTTP_200_OK,
             )
+
+        # No TOTP enrolled yet, so there's no second factor to wait on --
+        # this token issuance is the whole login.
+        log_activity(ActivityLog.Action.LOGIN_SUCCEEDED, actor=user, target_user=user)
 
         refresh = RefreshToken.for_user(user)
         return Response(
@@ -270,6 +293,9 @@ class TOTPLoginVerifyView(APIView):
     throttle_scope = "auth"
 
     def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity
+
         serializer = VerifyTOTPSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         mfa_token = serializer.validated_data["mfa_token"].strip()
@@ -312,6 +338,7 @@ class TOTPLoginVerifyView(APIView):
 
         if not is_valid:
             record_totp_failure(user_id)
+            log_activity(ActivityLog.Action.LOGIN_FAILED, target_user=user)
             return Response({"detail": "Invalid TOTP or backup code."}, status=status.HTTP_400_BAD_REQUEST)
 
         def _mark_used():
@@ -327,6 +354,7 @@ class TOTPLoginVerifyView(APIView):
 
         clear_totp_failures(user_id)
         invalidate_mfa_session(mfa_token)
+        log_activity(ActivityLog.Action.LOGIN_SUCCEEDED, actor=user, target_user=user)
 
         refresh = RefreshToken.for_user(user)
         return Response(
@@ -343,6 +371,9 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity
+
         refresh_token = request.data.get("refresh")
         if not refresh_token:
             return Response({"detail": "refresh is required."}, status=status.HTTP_400_BAD_REQUEST)
@@ -352,6 +383,7 @@ class LogoutView(APIView):
         except Exception:
             return Response({"detail": "Invalid or already-blacklisted refresh token."}, status=status.HTTP_400_BAD_REQUEST)
 
+        log_activity(ActivityLog.Action.LOGGED_OUT, actor=request.user, target_user=request.user)
         return Response(status=status.HTTP_205_RESET_CONTENT)
 
 

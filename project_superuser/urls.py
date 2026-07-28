@@ -18,4 +18,20 @@ urlpatterns = [
         name="superuser-create-superuser",
     ),
     path("users/<int:user_id>/", views.AdminUserDetailAPIView.as_view(), name="superuser-user-detail"),
+    path(
+        "users/<int:user_id>/remove-totp/",
+        views.AdminUserRemoveTOTPAPIView.as_view(),
+        name="superuser-user-remove-totp",
+    ),
+    path(
+        "users/<int:user_id>/reset-password/",
+        views.AdminUserResetPasswordAPIView.as_view(),
+        name="superuser-user-reset-password",
+    ),
+    path(
+        "users/<int:user_id>/revoke-sessions/",
+        views.AdminUserRevokeSessionsAPIView.as_view(),
+        name="superuser-user-revoke-sessions",
+    ),
+    path("audit-log/", views.ActivityLogListAPIView.as_view(), name="superuser-audit-log"),
 ]

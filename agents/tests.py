@@ -76,3 +76,73 @@ class UniversityAgentPartialEscalationTests(TestCase):
         self.assertFalse(result["pending"])
         self.assertNotIn("partial_pending", result)
         self.assertEqual(PendingQuery.objects.count(), 0)
+
+
+class UniversityAgentOfficerGuardrailTests(TestCase):
+    """
+    An officer chatting directly with their own agent (previewing/testing
+    it, or asking about a gap) is not a student waiting on an answer --
+    PendingQuery escalation is reserved for the student -> Aria -> Sol
+    chain. Officer calls should never create a PendingQuery; instead they
+    get a guardrail response pointing at the knowledge base gap.
+    """
+
+    def setUp(self):
+        University.objects.create(id="franklin_university", name="Franklin University", agent_name="Sol")
+        self.agent = UniversityAgent("franklin_university", auto_scrape=False)
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_low_confidence_officer_question_does_not_create_pending_query(self, mock_client):
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "I don't have information about that.",
+            "confidence": 0.0,
+            "unsupported_topics": [],
+        })
+
+        result = self.agent.answer(
+            "whats the info about wright state university",
+            caller_role="officer",
+        )
+
+        self.assertFalse(result["pending"])
+        self.assertTrue(result.get("knowledge_gap"))
+        self.assertNotIn("pending_query", result)
+        self.assertEqual(PendingQuery.objects.count(), 0)
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_officer_unsupported_topic_does_not_create_pending_query(self, mock_client):
+        self.agent.kb.store(
+            topic="Application deadlines",
+            content="Fall 2025 deadline is March 1.",
+            source_type="seed",
+            confidence=1.0,
+        )
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "Fall 2025 deadline is March 1. Funding isn't documented.",
+            "confidence": 0.85,
+            "unsupported_topics": ["funding"],
+        })
+
+        result = self.agent.answer(
+            "What are the deadlines and funding?",
+            caller_role="officer",
+        )
+
+        self.assertFalse(result["pending"])
+        self.assertNotIn("partial_pending", result)
+        self.assertTrue(result.get("knowledge_gap"))
+        self.assertEqual(result["unsupported_topics"], ["funding"])
+        self.assertEqual(PendingQuery.objects.count(), 0)
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_student_call_still_escalates(self, mock_client):
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "I don't have information about that.",
+            "confidence": 0.0,
+            "unsupported_topics": [],
+        })
+
+        result = self.agent.answer("whats the info about wright state university")
+
+        self.assertTrue(result["pending"])
+        self.assertEqual(PendingQuery.objects.count(), 1)

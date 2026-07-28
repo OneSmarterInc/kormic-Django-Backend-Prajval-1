@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.contrib.auth.password_validation import validate_password
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -9,12 +11,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.db_utils import run_with_retry
-from accounts.models import Account, TOTPDevice
+from accounts.models import Account, TOTPBackupCode, TOTPDevice
 from accounts.permissions import IsSuperUserRole, IsTOTPEnrolled
 from accounts.serializers import student_onboarding_status
 from django_api.models import StudentProfile
 from django_api.services import load_profile_data
 from project_superuser import services
+from project_superuser.models import ActivityLog
 from project_superuser.serializers import (
     ADMIN_PATCHABLE_UNIVERSITY_FIELDS,
     KB_SYNCED_UNIVERSITY_FIELDS,
@@ -49,6 +52,16 @@ def _serialize_account(account: Account) -> Dict[str, Any]:
 def _serialize_university(university: University) -> Dict[str, Any]:
     from universities.services import university_setup_status
 
+    # Exactly one officer login is created per university today (see
+    # AdminEnrollUniversitySerializer) -- surfaced here so a superadmin
+    # dashboard can show/contact the login without a separate /users/ call.
+    admin_account = (
+        Account.objects.filter(university_id=university.id, role=Account.Role.UNIVERSITY)
+        .select_related("user")
+        .order_by("created_at")
+        .first()
+    )
+
     return {
         "id": university.id,
         "name": university.name,
@@ -56,6 +69,7 @@ def _serialize_university(university: University) -> Dict[str, Any]:
         "location": university.location,
         "tagline": university.tagline,
         "description": university.description,
+        "university_email": university.contact_email,
         "contact_email": university.contact_email,
         "contact_phone": university.contact_phone,
         "website_url": university.website_url,
@@ -67,6 +81,15 @@ def _serialize_university(university: University) -> Dict[str, Any]:
         "not_best_fit_notes": university.not_best_fit_notes,
         "communication_style_notes": university.communication_style_notes,
         "never_do_notes": university.never_do_notes,
+        "admin_user_id": admin_account.user_id if admin_account else None,
+        "admin_email": admin_account.user.email if admin_account else None,
+        "admin_name": admin_account.user.first_name if admin_account else None,
+        "admin_is_active": admin_account.user.is_active if admin_account else None,
+        "admin_totp_enrolled": (
+            TOTPDevice.objects.filter(user_id=admin_account.user_id, confirmed_at__isnull=False).exists()
+            if admin_account
+            else None
+        ),
         "officer_count": Account.objects.filter(university_id=university.id, role=Account.Role.UNIVERSITY).count(),
         "setup_status": university_setup_status(university.id),
         "created_at": university.created_at,
@@ -348,3 +371,169 @@ class AdminUserDetailAPIView(APIView):
 
         run_with_retry(account.user.delete)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class AdminUserRemoveTOTPAPIView(APIView):
+    """
+    POST /api/superuser/users/<user_id>/remove-totp/
+    Deletes the user's TOTPDevice and any unused backup codes, so they
+    re-enter the must_enroll_totp flow on their next login. For when
+    someone's lost their authenticator and has no backup codes left --
+    there is no self-service equivalent, so this is the only recovery
+    path. A superuser may not remove their own TOTP through this endpoint
+    (same self-protection as the is_active/delete actions above).
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def post(self, request, user_id: int):
+        account = Account.objects.filter(user_id=user_id).select_related("user").first()
+        if account is None:
+            return _error("User not found.", status.HTTP_404_NOT_FOUND)
+
+        if account.user_id == request.user.id:
+            return _error("You cannot remove your own TOTP through this endpoint.")
+
+        def _do_remove():
+            with transaction.atomic():
+                TOTPDevice.objects.filter(user_id=user_id).delete()
+                TOTPBackupCode.objects.filter(user_id=user_id).delete()
+                services.log_activity(ActivityLog.Action.TOTP_REMOVED, actor=request.user, target_user=account.user)
+
+        run_with_retry(_do_remove)
+        return Response(_serialize_account(account))
+
+
+class AdminUserResetPasswordAPIView(APIView):
+    """
+    POST /api/superuser/users/<user_id>/reset-password/  Body: {"password": "..."}
+    Sets a new password directly and revokes every outstanding refresh
+    token for the user, so old sessions can't keep running under the
+    password they no longer know.
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def post(self, request, user_id: int):
+        account = Account.objects.filter(user_id=user_id).select_related("user").first()
+        if account is None:
+            return _error("User not found.", status.HTTP_404_NOT_FOUND)
+
+        password = (request.data or {}).get("password")
+        if not password:
+            return _error("password is required.")
+
+        try:
+            validate_password(password, user=account.user)
+        except DjangoValidationError as exc:
+            return _error(" ".join(exc.messages))
+
+        def _do_reset():
+            with transaction.atomic():
+                account.user.set_password(password)
+                account.user.save(update_fields=["password"])
+                services.revoke_all_sessions(account.user)
+                services.log_activity(ActivityLog.Action.PASSWORD_RESET, actor=request.user, target_user=account.user)
+
+        run_with_retry(_do_reset)
+        return Response(_serialize_account(account))
+
+
+class AdminUserRevokeSessionsAPIView(APIView):
+    """
+    POST /api/superuser/users/<user_id>/revoke-sessions/
+    Blacklists every outstanding refresh token for the user (force logout
+    everywhere). Any access token they're currently holding still works
+    until it naturally expires (ACCESS_TOKEN_LIFETIME, 30 min) -- this
+    only stops them getting a new one without logging in again.
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def post(self, request, user_id: int):
+        account = Account.objects.filter(user_id=user_id).select_related("user").first()
+        if account is None:
+            return _error("User not found.", status.HTTP_404_NOT_FOUND)
+
+        def _do_revoke():
+            with transaction.atomic():
+                revoked = services.revoke_all_sessions(account.user)
+                services.log_activity(ActivityLog.Action.SESSIONS_REVOKED, actor=request.user, target_user=account.user)
+                return revoked
+
+        revoked_count = run_with_retry(_do_revoke)
+        return Response({**_serialize_account(account), "revoked_sessions": revoked_count})
+
+
+# ---------------------------------------------------------------------
+# Audit log
+# ---------------------------------------------------------------------
+
+class ActivityLogListAPIView(APIView):
+    """
+    GET /api/superuser/audit-log/
+        ?user_id=<id>
+        &action=totp_removed|password_reset|sessions_revoked|registered|login_succeeded|login_failed|logged_out
+        &role=student|university|superuser
+        &university_id=<id>
+        &student_id=<id>
+        &limit=<n>
+    Read-only trail covering both admin-initiated actions (TOTP removal,
+    password reset, session revocation) and self-service auth activity
+    (register/login/logout, logged from accounts.views on this same
+    model), newest first.
+    - `user_id` matches either actor or target.
+    - `action` filters to one action type.
+    - `role` filters by the target's role at the time of the event.
+    - `university_id`/`student_id` filter to one specific university's or
+      student's activity (e.g. one university's full login history).
+    - `limit` defaults to 100, capped at 500.
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def get(self, request):
+        from django.db.models import Q
+
+        entries = ActivityLog.objects.all()
+
+        user_id = request.query_params.get("user_id", "").strip()
+        if user_id:
+            entries = entries.filter(Q(actor_id=user_id) | Q(target_user_id=user_id))
+
+        action = request.query_params.get("action", "").strip()
+        if action:
+            entries = entries.filter(action=action)
+
+        role = request.query_params.get("role", "").strip()
+        if role:
+            entries = entries.filter(target_role=role)
+
+        university_id = request.query_params.get("university_id", "").strip()
+        if university_id:
+            entries = entries.filter(target_university_id=university_id)
+
+        student_id = request.query_params.get("student_id", "").strip()
+        if student_id:
+            entries = entries.filter(target_student_id=student_id)
+
+        try:
+            limit = min(int(request.query_params.get("limit", 100)), 500)
+        except ValueError:
+            limit = 100
+
+        return Response({
+            "entries": [
+                {
+                    "id": entry.id,
+                    "actor_email": entry.actor_email,
+                    "action": entry.action,
+                    "target_email": entry.target_email,
+                    "target_role": entry.target_role,
+                    "target_student_id": entry.target_student_id,
+                    "target_university_id": entry.target_university_id,
+                    "created_at": entry.created_at,
+                }
+                for entry in entries[:limit]
+            ]
+        })

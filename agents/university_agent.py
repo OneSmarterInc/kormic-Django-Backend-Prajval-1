@@ -649,8 +649,12 @@ STUDENT CONTEXT:
         system-prompt context so the agent knows "my university"/"we" refers
         to itself instead of asking the officer to identify their school.
 
-        If the answer cannot be supported with enough confidence,
-        a pending query is created instead of hallucinating.
+        If the answer cannot be supported with enough confidence, a student
+        question creates a PendingQuery so a human contact can follow up.
+        An officer talking to their own agent is not a student waiting on
+        an answer -- escalation queries exist for the student -> Aria -> Sol
+        chain, so officer calls never create one. Instead they get a
+        guardrail response pointing at the knowledge base gap directly.
         """
         self.kb.total_questions_answered += 1
 
@@ -781,6 +785,23 @@ STUDENT:
         )
 
         if confidence < self.MIN_CONFIDENCE:
+            if caller_role == "officer":
+                return {
+                    "university": self.persona["name"],
+                    "agent_name": self.persona["agent_name"],
+                    "answer": (
+                        f"I can only answer questions about {self.persona['name']} using "
+                        "our verified knowledge base, and I don't have enough verified "
+                        "information on this yet. If it should be part of our knowledge "
+                        "base, add it there first and I'll be able to answer it directly."
+                    ),
+                    "pending": False,
+                    "knowledge_gap": True,
+                    "confidence": confidence,
+                    "trust": trust,
+                    "kb_size": self.kb.stats()["total_entries"],
+                }
+
             pending_query = self.create_pending_query(
                 question=question,
                 student_context=student_context,
@@ -821,19 +842,32 @@ STUDENT:
         # The overall confidence above only reflects the topics that WERE
         # supported -- a compound question can clear MIN_CONFIDENCE on
         # deadlines alone while funding has zero knowledge base coverage.
-        # That gap must still reach the university as a real follow-up
-        # instead of being silently absorbed into "confidence: 0.8".
+        # For a student's question that gap must still reach the university
+        # as a real follow-up instead of being silently absorbed into
+        # "confidence: 0.8". An officer previewing their own agent isn't a
+        # student waiting on an answer, so it's surfaced as a knowledge-base
+        # gap to fill instead of a pending query.
         if unsupported_topics:
-            pending_query = self.create_pending_query(
-                question=f"{question} (specifically: {', '.join(unsupported_topics)})",
-                student_context=student_context,
-                failure_reason=(
-                    "No knowledge base coverage for: " + ", ".join(unsupported_topics)
-                ),
-            )
-            result["partial_pending"] = True
-            result["pending_query"] = pending_query
-            result["unsupported_topics"] = unsupported_topics
+            if caller_role == "officer":
+                result["knowledge_gap"] = True
+                result["unsupported_topics"] = unsupported_topics
+                result["answer"] = (
+                    answer_text
+                    + "\n\nNote: your knowledge base does not yet cover: "
+                    + ", ".join(unsupported_topics)
+                    + ". Add this information so I can answer it directly next time."
+                )
+            else:
+                pending_query = self.create_pending_query(
+                    question=f"{question} (specifically: {', '.join(unsupported_topics)})",
+                    student_context=student_context,
+                    failure_reason=(
+                        "No knowledge base coverage for: " + ", ".join(unsupported_topics)
+                    ),
+                )
+                result["partial_pending"] = True
+                result["pending_query"] = pending_query
+                result["unsupported_topics"] = unsupported_topics
 
         return result
 
