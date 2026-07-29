@@ -37,12 +37,13 @@ class ActivityLog(models.Model):
         LOGIN_SUCCEEDED = "login_succeeded", "Login succeeded"
         LOGIN_FAILED = "login_failed", "Login failed"
         LOGGED_OUT = "logged_out", "Logged out"
+        PASSWORD_RESET_REQUESTED = "password_reset_requested", "Password reset requested"
 
     actor = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, related_name="activity_log_actions"
     )
     actor_email = models.CharField(max_length=255, blank=True, default="")
-    action = models.CharField(max_length=20, choices=Action.choices)
+    action = models.CharField(max_length=32, choices=Action.choices)
     target_user = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, related_name="activity_log_entries"
     )

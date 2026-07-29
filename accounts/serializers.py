@@ -75,6 +75,30 @@ class EnrollVerifySerializer(serializers.Serializer):
     code = serializers.CharField()
 
 
+class ForgotPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+
+class VerifyResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField()
+
+    def validate_otp(self, value: str) -> str:
+        code = "".join(str(value or "").split())
+        if not code.isdigit() or len(code) != 6:
+            raise serializers.ValidationError("Invalid or expired code.")
+        return code
+
+
+class ResetPasswordConfirmSerializer(serializers.Serializer):
+    reset_token = serializers.CharField()
+    new_password = serializers.CharField(write_only=True)
+
+    def validate_new_password(self, value: str) -> str:
+        validate_password(value)
+        return value
+
+
 def student_onboarding_status(student_id: str) -> dict:
     """
     Derived (not stored) so it can never drift out of sync with the actual

@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.db_utils import run_with_retry
+from accounts.email import send_otp_email, send_password_changed_email
 from accounts.github_oauth import (
     GitHubOAuthError,
     build_authorize_url,
@@ -34,11 +35,27 @@ from accounts.mfa import (
     record_totp_failure,
 )
 from accounts.models import TOTPBackupCode, TOTPDevice
+from accounts.password_reset import (
+    OTP_TTL,
+    RESET_TOKEN_TTL,
+    create_reset_session,
+    get_user_id_from_reset_token,
+    invalidate_reset_session,
+    is_otp_locked,
+    is_resend_throttled,
+    issue_otp,
+    record_otp_failure,
+    start_cooldown,
+    verify_otp,
+)
 from accounts.permissions import IsStudentRole, IsTOTPEnrolled
 from accounts.serializers import (
     EnrollVerifySerializer,
+    ForgotPasswordSerializer,
     LoginSerializer,
     RegisterSerializer,
+    ResetPasswordConfirmSerializer,
+    VerifyResetOTPSerializer,
     VerifyTOTPSerializer,
     serialize_user,
 )
@@ -392,6 +409,143 @@ class CurrentUserView(APIView):
 
     def get(self, request):
         return Response(_serialize_user_with_verification(request.user), status=status.HTTP_200_OK)
+
+
+_FORGOT_PASSWORD_GENERIC_MESSAGE = (
+    "If an account with that email exists, we've sent a one-time code to it."
+)
+_INVALID_OR_EXPIRED_OTP_MESSAGE = "Invalid or expired code."
+_INVALID_OR_EXPIRED_RESET_SESSION_MESSAGE = "This reset session has expired. Please start again."
+
+
+class ForgotPasswordView(APIView):
+    """
+    POST /api/auth/forgot-password/  { "email": "..." }
+
+    Step 1 of self-service password reset, open to every role (student,
+    university, superuser) since they're all just auth.User + Account --
+    see accounts.models.Account. Always answers with the same generic
+    message regardless of whether the email matches an account, and always
+    starts the resend cooldown keyed on the submitted email itself (not a
+    resolved user id), so a caller can't fingerprint real accounts by
+    response shape or by how quickly a second request gets throttled.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity
+
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"].strip().lower()
+
+        if is_resend_throttled(email):
+            return Response({"detail": _FORGOT_PASSWORD_GENERIC_MESSAGE}, status=status.HTTP_200_OK)
+
+        start_cooldown(email)
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user is not None:
+            otp = issue_otp(user.id)
+            send_otp_email(user, otp, ttl_minutes=OTP_TTL // 60)
+            log_activity(ActivityLog.Action.PASSWORD_RESET_REQUESTED, target_user=user)
+
+        return Response({"detail": _FORGOT_PASSWORD_GENERIC_MESSAGE}, status=status.HTTP_200_OK)
+
+
+class VerifyResetOTPView(APIView):
+    """
+    POST /api/auth/reset-password/verify-otp/  { "email": "...", "otp": "123456" }
+
+    Step 2: proves the caller received the emailed code. On success, hands
+    back a short-lived opaque reset_token (mirrors the mfa_token exchange
+    in LoginView/TOTPLoginVerifyView) instead of letting this call set the
+    password directly -- keeps "proved inbox ownership" and "chose a new
+    password" as separate steps.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        serializer = VerifyResetOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        email = serializer.validated_data["email"].strip().lower()
+        otp = serializer.validated_data["otp"]
+
+        user = User.objects.filter(email__iexact=email, is_active=True).first()
+        if user is None:
+            return Response({"detail": _INVALID_OR_EXPIRED_OTP_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+
+        if is_otp_locked(user.id):
+            return Response(
+                {"detail": "Too many incorrect attempts. Please request a new code."},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        if not verify_otp(user.id, otp):
+            record_otp_failure(user.id)
+            return Response({"detail": _INVALID_OR_EXPIRED_OTP_MESSAGE}, status=status.HTTP_400_BAD_REQUEST)
+
+        reset_token = create_reset_session(user.id)
+        return Response({"reset_token": reset_token, "expires_in": RESET_TOKEN_TTL}, status=status.HTTP_200_OK)
+
+
+class ResetPasswordConfirmView(APIView):
+    """
+    POST /api/auth/reset-password/confirm/  { "reset_token": "...", "new_password": "..." }
+
+    Step 3: spends the one-time reset_token to set a new password, revokes
+    every outstanding refresh token for the account (same helper the
+    superuser-forced reset uses -- project_superuser.services.
+    revoke_all_sessions), and emails a "your password changed" notice so an
+    account owner finds out even if the reset wasn't theirs.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_scope = "password_reset"
+
+    def post(self, request):
+        from project_superuser.models import ActivityLog
+        from project_superuser.services import log_activity, revoke_all_sessions
+
+        serializer = ResetPasswordConfirmSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        reset_token = serializer.validated_data["reset_token"]
+        new_password = serializer.validated_data["new_password"]
+
+        user_id = get_user_id_from_reset_token(reset_token)
+        if not user_id:
+            return Response(
+                {"detail": _INVALID_OR_EXPIRED_RESET_SESSION_MESSAGE}, status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        try:
+            user = User.objects.get(id=user_id, is_active=True)
+        except User.DoesNotExist:
+            invalidate_reset_session(reset_token)
+            return Response(
+                {"detail": _INVALID_OR_EXPIRED_RESET_SESSION_MESSAGE}, status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        def _reset():
+            with transaction.atomic():
+                user.set_password(new_password)
+                user.save(update_fields=["password"])
+                revoke_all_sessions(user)
+
+        run_with_retry(_reset)
+        invalidate_reset_session(reset_token)
+        log_activity(ActivityLog.Action.PASSWORD_RESET, actor=user, target_user=user)
+        send_password_changed_email(user)
+
+        return Response({"detail": "Password has been reset. Please log in again."}, status=status.HTTP_200_OK)
 
 
 class GitHubOAuthConnectView(APIView):

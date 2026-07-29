@@ -1,6 +1,8 @@
 from unittest import mock
 
 import pyotp
+from django.contrib.auth.models import User
+from django.core import mail
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -319,3 +321,171 @@ class AuthFlowTests(TestCase):
 
         resp = self.client.get("/api/auth/me/")
         self.assertTrue(resp.data["onboarding"]["linkedin_connected"])
+
+
+def _extract_otp(email_message) -> str:
+    import re
+
+    match = re.search(r"code is: (\d{6})", email_message.body)
+    assert match, f"no OTP found in email body: {email_message.body!r}"
+    return match.group(1)
+
+
+class ForgotPasswordFlowTests(TestCase):
+    """
+    Covers the self-service email-OTP password reset added to accounts.
+    Deliberately exercises a university-role account (not just student) to
+    confirm the flow is role-agnostic, per accounts.models.Account -- there
+    is no separate university login to special-case.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        cache.clear()
+        mail.outbox = []
+
+    def _make_user(self, email="student1@example.com", password="S3curePassw0rd!", role=Account.Role.STUDENT):
+        user = User.objects.create_user(username=email, email=email, password=password)
+        Account.objects.create(
+            user=user,
+            role=role,
+            student_id=make_student_id(email) if role == Account.Role.STUDENT else None,
+            university_id="wsu" if role == Account.Role.UNIVERSITY else None,
+        )
+        return user
+
+    def test_forgot_password_sends_otp_email_for_existing_user(self):
+        self._make_user()
+        resp = self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["student1@example.com"])
+
+    def test_forgot_password_generic_response_for_unknown_email(self):
+        resp = self.client.post("/api/auth/forgot-password/", {"email": "nobody@example.com"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_forgot_password_response_identical_for_known_and_unknown_email(self):
+        self._make_user()
+        known_resp = self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        cache.clear()
+        unknown_resp = self.client.post("/api/auth/forgot-password/", {"email": "nobody@example.com"}, format="json")
+        self.assertEqual(known_resp.data, unknown_resp.data)
+        self.assertEqual(known_resp.status_code, unknown_resp.status_code)
+
+    def test_forgot_password_resend_cooldown_suppresses_second_email(self):
+        self._make_user()
+        self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        resp2 = self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        self.assertEqual(resp2.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)  # second call was cooldown-suppressed, not a resend
+
+    def test_full_reset_flow_changes_password_and_revokes_sessions(self):
+        user = self._make_user(role=Account.Role.UNIVERSITY, email="admin@wsu.edu")
+
+        # Establish an active session (refresh token) before the reset, to
+        # verify it gets blacklisted afterwards.
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        refresh = RefreshToken.for_user(user)
+
+        self.client.post("/api/auth/forgot-password/", {"email": "admin@wsu.edu"}, format="json")
+        otp = _extract_otp(mail.outbox[0])
+
+        verify_resp = self.client.post(
+            "/api/auth/reset-password/verify-otp/", {"email": "admin@wsu.edu", "otp": otp}, format="json"
+        )
+        self.assertEqual(verify_resp.status_code, status.HTTP_200_OK)
+        reset_token = verify_resp.data["reset_token"]
+
+        confirm_resp = self.client.post(
+            "/api/auth/reset-password/confirm/",
+            {"reset_token": reset_token, "new_password": "N3wS3curePassw0rd!"},
+            format="json",
+        )
+        self.assertEqual(confirm_resp.status_code, status.HTTP_200_OK)
+
+        # Old password no longer works, new one does.
+        old_login = self.client.post(
+            "/api/auth/login/", {"email": "admin@wsu.edu", "password": "S3curePassw0rd!"}, format="json"
+        )
+        self.assertEqual(old_login.status_code, status.HTTP_401_UNAUTHORIZED)
+        new_login = self.client.post(
+            "/api/auth/login/", {"email": "admin@wsu.edu", "password": "N3wS3curePassw0rd!"}, format="json"
+        )
+        self.assertEqual(new_login.status_code, status.HTTP_200_OK)
+
+        # Pre-reset refresh token was revoked.
+        refresh_resp = self.client.post("/api/auth/refresh/", {"refresh": str(refresh)}, format="json")
+        self.assertEqual(refresh_resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # A confirmation email was sent, and the OTP/reset_token can't be replayed.
+        self.assertEqual(len(mail.outbox), 2)
+        replay_resp = self.client.post(
+            "/api/auth/reset-password/confirm/",
+            {"reset_token": reset_token, "new_password": "AnotherPassw0rd!"},
+            format="json",
+        )
+        self.assertEqual(replay_resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_verify_otp_wrong_code_rejected(self):
+        self._make_user()
+        self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        resp = self.client.post(
+            "/api/auth/reset-password/verify-otp/",
+            {"email": "student1@example.com", "otp": "000000"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_verify_otp_locked_after_max_attempts(self):
+        self._make_user()
+        self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        for _ in range(5):
+            self.client.post(
+                "/api/auth/reset-password/verify-otp/",
+                {"email": "student1@example.com", "otp": "000000"},
+                format="json",
+            )
+        otp = _extract_otp(mail.outbox[0])
+        resp = self.client.post(
+            "/api/auth/reset-password/verify-otp/", {"email": "student1@example.com", "otp": otp}, format="json"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+    def test_verify_otp_cannot_be_reused(self):
+        self._make_user()
+        self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        otp = _extract_otp(mail.outbox[0])
+        first = self.client.post(
+            "/api/auth/reset-password/verify-otp/", {"email": "student1@example.com", "otp": otp}, format="json"
+        )
+        self.assertEqual(first.status_code, status.HTTP_200_OK)
+        second = self.client.post(
+            "/api/auth/reset-password/verify-otp/", {"email": "student1@example.com", "otp": otp}, format="json"
+        )
+        self.assertEqual(second.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_reset_confirm_rejects_expired_or_unknown_token(self):
+        resp = self.client.post(
+            "/api/auth/reset-password/confirm/",
+            {"reset_token": "not-a-real-token", "new_password": "N3wS3curePassw0rd!"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_reset_confirm_enforces_password_validation(self):
+        self._make_user()
+        self.client.post("/api/auth/forgot-password/", {"email": "student1@example.com"}, format="json")
+        otp = _extract_otp(mail.outbox[0])
+        reset_token = self.client.post(
+            "/api/auth/reset-password/verify-otp/", {"email": "student1@example.com", "otp": otp}, format="json"
+        ).data["reset_token"]
+
+        resp = self.client.post(
+            "/api/auth/reset-password/confirm/",
+            {"reset_token": reset_token, "new_password": "short"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)

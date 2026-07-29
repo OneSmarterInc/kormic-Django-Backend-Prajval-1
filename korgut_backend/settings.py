@@ -179,6 +179,7 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "auth": "60/min",
+        "password_reset": "10/min",
     },
 }
 
@@ -233,3 +234,28 @@ CELERY_BEAT_SCHEDULE = {
 
 # Expo push notifications (student mobile app).
 EXPO_PUSH_ACCESS_TOKEN = os.environ.get("EXPO_PUSH_ACCESS_TOKEN", "")
+
+# Email configuration -- used to deliver password-reset OTP codes (see
+# accounts.email) and, in DEBUG, defaults to Ethereal's fake SMTP catch-all
+# so nothing is ever really delivered from a dev machine. Production must
+# set real EMAIL_HOST_USER/EMAIL_HOST_PASSWORD/DEFAULT_FROM_EMAIL (and
+# EMAIL_HOST/EMAIL_PORT if not using Gmail-style TLS SMTP) via the
+# environment -- see .env.template.
+if DEBUG:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.ethereal.email")
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+    EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+    EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
+    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+    DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "test@example.com")
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.environ["EMAIL_HOST"]
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+    EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+    EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
+    EMAIL_HOST_USER = os.environ["EMAIL_HOST_USER"]
+    EMAIL_HOST_PASSWORD = os.environ["EMAIL_HOST_PASSWORD"]
+    DEFAULT_FROM_EMAIL = os.environ["DEFAULT_FROM_EMAIL"]
