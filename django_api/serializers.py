@@ -16,6 +16,7 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
 
     institution = serializers.CharField(required=False, allow_blank=True)
     major = serializers.CharField(required=False, allow_blank=True)
+    program = serializers.CharField(required=False, allow_blank=True)
     graduation_year = serializers.IntegerField(required=False, allow_null=True)
 
     gpa = serializers.FloatField(required=False, allow_null=True)
@@ -25,6 +26,7 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
     gre_verbal = serializers.IntegerField(required=False, allow_null=True)
     toefl = serializers.IntegerField(required=False, allow_null=True)
     ielts = serializers.FloatField(required=False, allow_null=True)
+    english_score_text = serializers.CharField(required=False, allow_blank=True)
 
     budget = serializers.IntegerField(required=False, allow_null=True)
     target_country = serializers.CharField(required=False, allow_blank=True)
@@ -40,6 +42,10 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
         for field in NULLABLE_NUMERIC_FIELDS:
             if data.get(field, None) == "":
                 data[field] = None
+
+        if not data.get("english_score_text") and data.get("english_score") not in (None, ""):
+            data["english_score_text"] = str(data["english_score"])
+
         return super().to_internal_value(data)
 
 

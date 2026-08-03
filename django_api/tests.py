@@ -110,6 +110,31 @@ class OwnershipTests(TestCase):
         self.assertEqual(resp.data["student_id"], self.student_a_id)
         self.assertFalse(StudentProfile.objects.filter(student_id=self.student_b_id).exists())
 
+    def test_program_and_english_score_are_saved(self):
+        resp = self.student_a.post(
+            "/api/profile/",
+            {
+                "name": "Sakshi Bhagat",
+                "program": "Computer Science",
+                "english_score": 75,
+                "english_score_text": "75",
+                "toefl": 56,
+                "ielts": 89,
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["profile"]["program"], "Computer Science")
+        self.assertEqual(resp.data["profile"]["english_score_text"], "75")
+
+        # A second update with different values should overwrite, not stick
+        # to the first POST's values.
+        resp = self.student_a.post(
+            "/api/profile/", {"program": "MS Computer Science", "english_score": 90}, format="json"
+        )
+        self.assertEqual(resp.data["profile"]["program"], "MS Computer Science")
+        self.assertEqual(resp.data["profile"]["english_score_text"], "90")
+
     def test_blank_numeric_fields_do_not_400(self):
         resp = self.student_a.post(
             "/api/profile/",
@@ -205,6 +230,112 @@ class ChatHistoryTests(TestCase):
 
         self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 0)
         self.assertEqual(other.get("/api/chat/agent/history/").data["count"], 1)
+
+
+class ChatEditAndAttachmentTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student, self.student_id = make_student_client(email="e@example.com")
+        self.student.post("/api/profile/", {"name": "Erin"}, format="json")
+
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_agent_chat_with_image_attachment_is_saved_and_sent_to_model(self, mock_run_turn):
+        mock_run_turn.return_value = ("Nova", "I see the screenshot.")
+
+        image = SimpleUploadedFile("screenshot.png", b"fake-png-bytes", content_type="image/png")
+        resp = self.student.post(
+            "/api/chat/agent/", {"message": "Check this out", "attachments": [image]}, format="multipart"
+        )
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(resp.data["attachments"]), 1)
+        self.assertEqual(resp.data["attachments"][0]["filename"], "screenshot.png")
+
+        from django_api.models import ChatAttachment
+
+        self.assertEqual(ChatAttachment.objects.count(), 1)
+
+        # The model should have received an image content block, not just text.
+        call_args, call_kwargs = mock_run_turn.call_args
+        self.assertEqual(call_args[1], "Check this out")
+        self.assertTrue(call_kwargs["image_blocks"])
+        self.assertEqual(call_kwargs["image_blocks"][0]["type"], "image")
+
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_agent_chat_rejects_unsupported_attachment_type(self, mock_run_turn):
+        bad_file = SimpleUploadedFile("virus.exe", b"whatever", content_type="application/x-msdownload")
+        resp = self.student.post(
+            "/api/chat/agent/", {"message": "hi", "attachments": [bad_file]}, format="multipart"
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        mock_run_turn.assert_not_called()
+
+        from django_api.models import ChatMessage
+
+        self.assertEqual(ChatMessage.objects.filter(student_id=self.student_id).count(), 0)
+
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_edit_message_truncates_and_regenerates(self, mock_run_turn):
+        mock_run_turn.side_effect = [
+            ("Nova", "First reply"),
+            ("Nova", "Second reply"),
+            ("Nova", "Regenerated reply"),
+        ]
+
+        self.student.post("/api/chat/agent/", {"message": "First question"}, format="json")
+        self.student.post("/api/chat/agent/", {"message": "Second question"}, format="json")
+
+        from django_api.models import ChatMessage
+
+        first_user_msg = (
+            ChatMessage.objects.filter(student_id=self.student_id, sender=ChatMessage.Sender.USER)
+            .order_by("created_at")
+            .first()
+        )
+
+        edit_resp = self.student.patch(
+            f"/api/chat/agent/{first_user_msg.id}/edit/", {"message": "Edited question"}, format="json"
+        )
+        self.assertEqual(edit_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(edit_resp.data["reply"], "Regenerated reply")
+
+        history = self.student.get("/api/chat/agent/history/").data["messages"]
+        # The stale second question/reply pair is gone -- only the edited
+        # question and its fresh regenerated reply remain.
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]["content"], "Edited question")
+        self.assertIsNotNone(history[0]["edited_at"])
+        self.assertEqual(history[1]["content"], "Regenerated reply")
+
+    def test_edit_message_requires_ownership(self):
+        other, other_id = make_student_client(email="f@example.com")
+        other.post("/api/profile/", {"name": "Frank"}, format="json")
+
+        from django_api.models import ChatMessage
+
+        msg = ChatMessage.objects.create(
+            channel=ChatMessage.Channel.AGENT, student_id=other_id, sender=ChatMessage.Sender.USER, content="theirs"
+        )
+
+        resp = self.student.patch(f"/api/chat/agent/{msg.id}/edit/", {"message": "hijack"}, format="json")
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    @mock.patch("pure_multi_agent.runtime.run_turn")
+    def test_attachment_download_requires_ownership(self, mock_run_turn):
+        mock_run_turn.return_value = ("Nova", "ok")
+        image = SimpleUploadedFile("shot.png", b"bytes", content_type="image/png")
+        resp = self.student.post("/api/chat/agent/", {"message": "hi", "attachments": [image]}, format="multipart")
+        attachment_id = resp.data["attachments"][0]["id"]
+
+        other, _ = make_student_client(email="g@example.com")
+        other.post("/api/profile/", {"name": "Gina"}, format="json")
+
+        own_resp = self.student.get(f"/api/chat/agent/attachments/{attachment_id}/")
+        self.assertEqual(own_resp.status_code, status.HTTP_200_OK)
+
+        other_resp = other.get(f"/api/chat/agent/attachments/{attachment_id}/")
+        self.assertEqual(other_resp.status_code, status.HTTP_403_FORBIDDEN)
 
 
 class SubResourceHistoryTests(TestCase):

@@ -25,6 +25,7 @@ from accounts.permissions import (
     get_account,
 )
 from django_api.models import (
+    ChatAttachment,
     ChatMessage,
     FitAssessment,
     GitHubAnalysis,
@@ -42,6 +43,8 @@ from django_api.serializers import (
     ResumeUploadSerializer,
 )
 from django_api.services import (
+    CHAT_ATTACHMENT_MAX_PER_MESSAGE,
+    build_image_content_blocks,
     create_or_update_profile,
     delete_profile_image,
     format_profile_response,
@@ -54,6 +57,7 @@ from django_api.services import (
     analyze_github,
     analyze_linkedin,
     load_profile_data,
+    save_chat_attachment,
     save_profile_data,
     make_student_id,
     upload_profile_image,
@@ -66,15 +70,18 @@ STUDENT_OWNER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole, Sco
 UNIVERSITY_OWNER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole, ScopedToOwnUniversityId]
 
 
-def log_chat_turn(*, channel, student_id, university_id="", user_message="", assistant_message="", meta=None):
-    ChatMessage.objects.create(
+def log_chat_turn(
+    *, channel, student_id, university_id="", user_message="", assistant_message="", meta=None, user_meta=None
+):
+    user_msg = ChatMessage.objects.create(
         channel=channel,
         student_id=student_id,
         university_id=university_id or "",
         sender=ChatMessage.Sender.USER,
         content=user_message,
+        meta=user_meta or {},
     )
-    ChatMessage.objects.create(
+    assistant_msg = ChatMessage.objects.create(
         channel=channel,
         student_id=student_id,
         university_id=university_id or "",
@@ -82,6 +89,7 @@ def log_chat_turn(*, channel, student_id, university_id="", user_message="", ass
         content=assistant_message,
         meta=meta or {},
     )
+    return user_msg, assistant_msg
 
 
 # ---------------------------------------------------------------------
@@ -112,8 +120,11 @@ def api_home(request):
         },
         "chat_apis": {
             "profile_intake": "POST /api/chat/intake/",
-            "agent_chat": "POST /api/chat/agent/",
+            "agent_chat": "POST /api/chat/agent/ (multipart: message, attachments[])",
             "agent_chat_history": "GET /api/chat/agent/history/",
+            "agent_chat_new": "POST /api/chat/agent/new/",
+            "agent_chat_edit": "PATCH /api/chat/agent/<message_id>/edit/",
+            "chat_attachment": "GET /api/chat/agent/attachments/<attachment_id>/",
         },
         "core_apis": {
             "roadmap": "GET /api/roadmap/<student_id>/",
@@ -752,50 +763,210 @@ class AgentNameAPIView(APIView):
 # runtime in pure_multi_agent/.
 # ---------------------------------------------------------------------
 
+def _serialize_attachment(request, attachment: "ChatAttachment") -> Dict[str, Any]:
+    from django.urls import reverse
+
+    return {
+        "id": attachment.id,
+        "filename": attachment.original_filename,
+        "content_type": attachment.content_type,
+        "size_bytes": attachment.size_bytes,
+        "url": request.build_absolute_uri(reverse("chat-attachment-detail", args=[attachment.id])),
+    }
+
+
+def _notify_agent_reply(student_id: str, agent_name: str, reply: str) -> None:
+    # A notification failure must never fail the chat response itself.
+    try:
+        from notifications.services import notify_agent_reply
+
+        notify_agent_reply(student_id=student_id, agent_name=agent_name, reply=reply or "")
+    except Exception:
+        logger.exception("Failed to queue agent-reply push notification for student_id=%s", student_id)
+
+
 @api_view(["POST"])
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat(request):
     from pure_multi_agent.runtime import run_turn
 
     student_id = request.user.account.student_id
-    message = request.data.get("message")
+    message = str(request.data.get("message") or "")
+    uploaded_files = request.FILES.getlist("attachments")
 
-    if not message:
-        return api_error("message is required.")
+    if not message.strip() and not uploaded_files:
+        return api_error("message or at least one attachment is required.")
+    if len(uploaded_files) > CHAT_ATTACHMENT_MAX_PER_MESSAGE:
+        return api_error(f"You can attach at most {CHAT_ATTACHMENT_MAX_PER_MESSAGE} files per message.")
+
+    user_msg = ChatMessage.objects.create(
+        channel=ChatMessage.Channel.AGENT,
+        student_id=student_id,
+        sender=ChatMessage.Sender.USER,
+        content=message,
+    )
+
+    attachments = []
+    try:
+        for uploaded_file in uploaded_files:
+            attachments.append(save_chat_attachment(student_id, user_msg, uploaded_file))
+    except ValueError as exc:
+        user_msg.delete()
+        return api_error(str(exc))
+
+    image_blocks = build_image_content_blocks(attachments)
+    # A message made up of only attachments still needs some text for the
+    # model turn -- describe what was shared instead of sending empty content.
+    effective_message = message.strip() or (
+        "(Shared file(s) with no additional message: "
+        + ", ".join(a.original_filename for a in attachments) + ")"
+    )
 
     try:
-        agent_name, reply = run_turn(student_id, message)
-        log_chat_turn(
+        agent_name, reply = run_turn(student_id, effective_message, image_blocks=image_blocks or None)
+        ChatMessage.objects.create(
             channel=ChatMessage.Channel.AGENT,
             student_id=student_id,
-            user_message=message,
-            assistant_message=reply or "",
+            sender=ChatMessage.Sender.ASSISTANT,
+            content=reply or "",
         )
+        _notify_agent_reply(student_id, agent_name, reply or "")
 
-        # Push notification so the student is alerted even if they closed
-        # the app while this (possibly slow) turn was being generated. A
-        # notification failure must never fail the chat response itself.
-        try:
-            from notifications.services import notify_agent_reply
-
-            notify_agent_reply(student_id=student_id, agent_name=agent_name, reply=reply or "")
-        except Exception:
-            logger.exception("Failed to queue agent-reply push notification for student_id=%s", student_id)
-
-        return Response({"agent": agent_name, "student_id": student_id, "reply": reply})
+        return Response({
+            "agent": agent_name,
+            "student_id": student_id,
+            "reply": reply,
+            "message_id": user_msg.id,
+            "attachments": [_serialize_attachment(request, a) for a in attachments],
+        })
     except Exception as exc:
         return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(["PATCH"])
+@permission_classes(STUDENT_PERMISSIONS)
+def agent_chat_edit(request, message_id):
+    """
+    PATCH /api/chat/agent/<message_id>/edit/
+    Edits a previously-sent user message and regenerates the AI reply from
+    that point: the old reply and everything sent after it are discarded --
+    they were responding to a question that no longer exists once the
+    message is changed -- and the in-process LangGraph conversation state is
+    rebuilt to match (see pure_multi_agent.runtime.seed_conversation) before
+    asking the model again. Attachments already on the message are left
+    alone and are still sent to the model along with the edited text.
+    """
+    from django.utils import timezone
+
+    from pure_multi_agent.runtime import run_turn, seed_conversation
+
+    student_id = request.user.account.student_id
+    new_message = str(request.data.get("message", "")).strip()
+
+    if not new_message:
+        return api_error("message is required.")
+
+    target = ChatMessage.objects.filter(
+        pk=message_id,
+        channel=ChatMessage.Channel.AGENT,
+        student_id=student_id,
+        sender=ChatMessage.Sender.USER,
+    ).first()
+    if target is None:
+        return api_error("Message not found.", status.HTTP_404_NOT_FOUND)
+
+    prior_turns = list(
+        ChatMessage.objects.filter(channel=ChatMessage.Channel.AGENT, student_id=student_id, pk__lt=target.pk)
+        .order_by("created_at")
+        .values_list("sender", "content")
+    )
+
+    # Everything after the edited message is now stale -- it was generated
+    # in response to a question that no longer exists.
+    ChatMessage.objects.filter(
+        channel=ChatMessage.Channel.AGENT, student_id=student_id, pk__gt=target.pk
+    ).delete()
+
+    image_blocks = build_image_content_blocks(target.attachments.all())
+
+    target.content = new_message
+    target.edited_at = timezone.now()
+    target.save(update_fields=["content", "edited_at"])
+
+    seed_conversation(student_id, prior_turns)
+
+    try:
+        agent_name, reply = run_turn(student_id, new_message, image_blocks=image_blocks or None)
+        ChatMessage.objects.create(
+            channel=ChatMessage.Channel.AGENT,
+            student_id=student_id,
+            sender=ChatMessage.Sender.ASSISTANT,
+            content=reply or "",
+        )
+        _notify_agent_reply(student_id, agent_name, reply or "")
+
+        return Response({
+            "agent": agent_name,
+            "student_id": student_id,
+            "reply": reply,
+            "message_id": target.id,
+            "edited_at": target.edited_at,
+        })
+    except Exception as exc:
+        return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ChatAttachmentDetailAPIView(APIView):
+    """
+    GET /api/chat/agent/attachments/<attachment_id>/
+    Streams one chat-uploaded screenshot/document, scoped to the owning
+    student via the parent ChatMessage -- same pattern as
+    LinkedInImageDetailAPIView.
+    """
+
+    permission_classes = STUDENT_PERMISSIONS
+
+    def get(self, request, attachment_id):
+        try:
+            attachment = ChatAttachment.objects.select_related("message").get(pk=attachment_id)
+        except ChatAttachment.DoesNotExist:
+            return api_error("Attachment not found.", status.HTTP_404_NOT_FOUND)
+
+        if attachment.message.student_id != request.user.account.student_id:
+            return api_error("You may only access your own chat attachments.", status.HTTP_403_FORBIDDEN)
+
+        file_path = Path(attachment.file_path)
+        if not file_path.exists():
+            return api_error("Attachment file is missing on the server.", status.HTTP_404_NOT_FOUND)
+
+        content = file_path.read_bytes()
+        return FileResponse(
+            io.BytesIO(content),
+            as_attachment=False,
+            filename=attachment.original_filename,
+            content_type=attachment.content_type or None,
+        )
 
 
 @api_view(["GET"])
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat_history(request):
     student_id = request.user.account.student_id
-    messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.AGENT, student_id=student_id)
+    messages = ChatMessage.objects.filter(
+        channel=ChatMessage.Channel.AGENT, student_id=student_id
+    ).prefetch_related("attachments")
     return Response({
         "count": messages.count(),
         "messages": [
-            {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
+            {
+                "id": m.id,
+                "sender": m.sender,
+                "content": m.content,
+                "created_at": m.created_at,
+                "edited_at": m.edited_at,
+                "meta": m.meta,
+                "attachments": [_serialize_attachment(request, a) for a in m.attachments.all()],
+            }
             for m in messages
         ],
     })

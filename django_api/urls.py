@@ -37,6 +37,12 @@ urlpatterns = [
     # wiping the one conversation there is. Kept as a single canonical
     # endpoint rather than two aliases that could quietly drift apart.
     path("chat/agent/new/", views.agent_chat_new, name="agent-chat-new"),
+    path("chat/agent/<int:message_id>/edit/", views.agent_chat_edit, name="agent-chat-edit"),
+    path(
+        "chat/agent/attachments/<int:attachment_id>/",
+        views.ChatAttachmentDetailAPIView.as_view(),
+        name="chat-attachment-detail",
+    ),
 
     # Fit assessment history is read-only now -- generation happens only via
     # agent_chat (agents.commons.generate_fit_assessment), never a direct POST.

@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 
@@ -135,7 +135,45 @@ def reset_conversation(student_id: str) -> None:
     _checkpointer.delete_thread(key)
 
 
-def run_turn(student_id: str, message: str) -> tuple[str, str]:
+def seed_conversation(student_id: str, turns: List[Tuple[str, str]]) -> None:
+    """
+    Reset this student's in-process LangGraph thread and, if `turns` is
+    non-empty, pre-load it with a known-good prefix of prior turns
+    (oldest-first (sender, content) pairs, sender being "user"/"assistant")
+    with no model call involved. Used by the chat "edit message" flow: after
+    a message is edited, everything after it in the transcript is discarded
+    and the LangGraph thread must be rebuilt to match, so the regenerated
+    reply is grounded in the same context the model had right before the
+    edit -- not the stale, now-invalid conversation state left over from
+    before the edit.
+    """
+    reset_conversation(student_id)
+    if not turns:
+        return
+
+    ctx = _load_context(student_id)
+    system_prompt = prompts.build_runtime_system_prompt(
+        agent_name=ctx["agent_name"],
+        student_profile=ctx["student_profile"],
+        memory=ctx["memory"],
+        response_mode=ctx["response_mode"],
+        pending_item=ctx.get("pending_verification_item"),
+    )
+    agent = build_student_agent(ctx, system_prompt, _checkpointer)
+
+    messages = [
+        HumanMessage(content=content) if sender == "user" else AIMessage(content=content)
+        for sender, content in turns
+    ]
+    agent.update_state(
+        {"configurable": {"thread_id": ctx["canonical_student_id"]}},
+        {"messages": messages},
+    )
+
+
+def run_turn(
+    student_id: str, message: str, image_blocks: Optional[List[Dict[str, Any]]] = None
+) -> tuple[str, str]:
     ctx = _load_context(student_id)
 
     if VERBOSE:
@@ -156,9 +194,14 @@ def run_turn(student_id: str, message: str) -> tuple[str, str]:
     agent = build_student_agent(ctx, system_prompt, _checkpointer)
     tracer = GraphTraceLogger(label=ctx["canonical_student_id"])
 
+   
+    human_content: Any = message
+    if image_blocks:
+        human_content = [{"type": "text", "text": message}, *image_blocks]
+
     try:
         result = agent.invoke(
-            {"messages": [HumanMessage(content=message)]},
+            {"messages": [HumanMessage(content=human_content)]},
             config={
                 "configurable": {"thread_id": ctx["canonical_student_id"]},
                 "recursion_limit": 25,

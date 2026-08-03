@@ -1,6 +1,7 @@
 from django.contrib import admin
 
 from django_api.models import (
+    ChatAttachment,
     ChatMessage,
     FitAssessment,
     GitHubAnalysis,
@@ -26,9 +27,16 @@ class IntakeSessionAdmin(admin.ModelAdmin):
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(admin.ModelAdmin):
-    list_display = ("student_id", "channel", "university_id", "sender", "created_at")
+    list_display = ("student_id", "channel", "university_id", "sender", "edited_at", "created_at")
     search_fields = ("student_id", "university_id", "content")
     list_filter = ("channel", "sender")
+
+
+@admin.register(ChatAttachment)
+class ChatAttachmentAdmin(admin.ModelAdmin):
+    list_display = ("message", "original_filename", "content_type", "size_bytes", "created_at")
+    search_fields = ("original_filename", "message__student_id")
+    list_filter = ("content_type",)
 
 
 @admin.register(ResumeUpload)

@@ -158,6 +158,8 @@ class ChatMessage(models.Model):
     content = models.TextField()
     meta = models.JSONField(default=dict, blank=True)
 
+    edited_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
@@ -165,6 +167,25 @@ class ChatMessage(models.Model):
 
     def __str__(self) -> str:
         return f"ChatMessage({self.channel}, {self.student_id}, {self.sender})"
+
+
+class ChatAttachment(models.Model):
+    """
+    A file (screenshot/document) a student attached to one of their own
+    ChatMessage turns. Stored on disk the same way as ResumeUpload/
+    LinkedInAnalysis uploads; only ever served back through an
+    ownership-checked endpoint, never raw MEDIA_URL.
+    """
+
+    message = models.ForeignKey(ChatMessage, on_delete=models.CASCADE, related_name="attachments")
+    file_path = models.CharField(max_length=1000)
+    original_filename = models.CharField(max_length=500)
+    content_type = models.CharField(max_length=150, blank=True, default="")
+    size_bytes = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"ChatAttachment({self.message_id}, {self.original_filename})"
 
 
 class ResumeUpload(models.Model):

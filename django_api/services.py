@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import re
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from django_api.models import (
+    ChatAttachment,
     GitHubAnalysis,
     LinkedInAnalysis,
     ResumeUpload,
@@ -159,8 +161,8 @@ def create_or_update_profile(validated_data: Dict[str, Any]) -> Dict[str, Any]:
     profile["student_id"] = student_id
 
     direct_fields = [
-        "name", "email", "country", "institution", "major", "graduation_year",
-        "gpa", "gpa_scale", "gre_quant", "gre_verbal", "toefl", "ielts",
+        "name", "email", "country", "institution", "major", "program", "graduation_year",
+        "gpa", "gpa_scale", "gre_quant", "gre_verbal", "toefl", "ielts", "english_score_text",
         "budget", "github", "linkedin_url", "notes",
     ]
 
@@ -756,6 +758,19 @@ def delete_profile_image(student_id: str) -> bool:
     return True
 
 
+CHAT_ATTACHMENT_IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp", "image/gif"}
+CHAT_ATTACHMENT_DOCUMENT_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+CHAT_ATTACHMENT_ALLOWED_TYPES = CHAT_ATTACHMENT_IMAGE_TYPES | CHAT_ATTACHMENT_DOCUMENT_TYPES
+CHAT_ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024  # 15 MB per file
+CHAT_ATTACHMENT_MAX_PER_MESSAGE = 5
+
+
 def save_uploaded_file(student_id: str, uploaded_file, folder_name: str) -> Path:
     student_id = make_student_id(student_id)
     target_dir = UPLOADS_DIR / folder_name / student_id
@@ -773,6 +788,60 @@ def save_uploaded_file(student_id: str, uploaded_file, folder_name: str) -> Path
             destination.write(chunk)
 
     return file_path
+
+
+def save_chat_attachment(student_id: str, message, uploaded_file) -> ChatAttachment:
+    """
+    Save one chat-uploaded screenshot/document to disk and record it against
+    `message` (a ChatMessage row already saved by the caller). Raises
+    ValueError on an unsupported type or an over-size file -- callers are
+    expected to turn that into a 400 response, same as other upload endpoints.
+    """
+    content_type = getattr(uploaded_file, "content_type", "") or ""
+    if content_type not in CHAT_ATTACHMENT_ALLOWED_TYPES:
+        raise ValueError(f"Unsupported attachment type: {content_type or 'unknown'}.")
+    if uploaded_file.size > CHAT_ATTACHMENT_MAX_BYTES:
+        raise ValueError(
+            f"'{uploaded_file.name}' is too large. Max size is "
+            f"{CHAT_ATTACHMENT_MAX_BYTES // (1024 * 1024)}MB."
+        )
+
+    file_path = save_uploaded_file(student_id, uploaded_file, "chat_attachments")
+    return ChatAttachment.objects.create(
+        message=message,
+        file_path=str(file_path),
+        original_filename=Path(uploaded_file.name).name,
+        content_type=content_type,
+        size_bytes=uploaded_file.size,
+    )
+
+
+def build_image_content_blocks(attachments) -> List[Dict[str, Any]]:
+    """
+    Turn image ChatAttachment rows into Anthropic-style vision content
+    blocks (same block shape agents.linkedin_agent.LinkedInAgent uses), so
+    the student's agent can actually see screenshots shared in chat, not
+    just store them inertly. Non-image attachments (PDFs, docs) are skipped
+    here -- they're stored and downloadable, but not sent to the model.
+    """
+    blocks: List[Dict[str, Any]] = []
+    for attachment in attachments:
+        if attachment.content_type not in CHAT_ATTACHMENT_IMAGE_TYPES:
+            continue
+        path = Path(attachment.file_path)
+        if not path.exists():
+            continue
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("utf-8")
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": attachment.content_type,
+                "data": data,
+            },
+        })
+    return blocks
 
 
 def merge_resume_data_into_profile(student_id: str, extracted_data: Dict[str, Any]) -> Dict[str, Any]:
