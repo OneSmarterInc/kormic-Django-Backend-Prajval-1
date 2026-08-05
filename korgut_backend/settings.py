@@ -30,10 +30,8 @@ load_dotenv(BASE_DIR / ".env")
 # SECURITY WARNING: keep the secret key used in production secret!
 # Falls back to the original dev-only value so local setups are unaffected;
 # set DJANGO_SECRET_KEY in .env for any server that's reachable off localhost.
-SECRET_KEY = os.environ.get(
-    "DJANGO_SECRET_KEY",
-    'django-insecure-0zav109$orgckjm3w+%%8v!lxt&4)qv68d^w*f%@fid@_y!c83',
-)
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or \
+    'django-insecure-0zav109$orgckjm3w+%%8v!lxt&4)qv68d^w*f%@fid@_y!c83'
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"

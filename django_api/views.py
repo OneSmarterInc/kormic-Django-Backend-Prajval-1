@@ -785,6 +785,30 @@ def _notify_agent_reply(student_id: str, agent_name: str, reply: str) -> None:
         logger.exception("Failed to queue agent-reply push notification for student_id=%s", student_id)
 
 
+def _existing_pending_query_ids(student_id: str) -> set:
+    return set(PendingQuery.objects.filter(student_id=student_id).values_list("id", flat=True))
+
+
+def _new_pending_query(student_id: str, existing_ids: set) -> Optional["PendingQuery"]:
+  
+    return (
+        PendingQuery.objects.filter(student_id=student_id)
+        .exclude(id__in=existing_ids)
+        .order_by("id")
+        .first()
+    )
+
+
+def _escalation_meta(pending_query: Optional["PendingQuery"]) -> Dict[str, Any]:
+    if pending_query is None:
+        return {}
+    return {
+        "type": "escalation_pending",
+        "query_id": pending_query.id,
+        "university_id": pending_query.university_id,
+    }
+
+
 @api_view(["POST"])
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat(request):
@@ -823,12 +847,16 @@ def agent_chat(request):
     )
 
     try:
+        _existing_pq_ids = _existing_pending_query_ids(student_id)
         agent_name, reply = run_turn(student_id, effective_message, image_blocks=image_blocks or None)
+
+        _pq = _new_pending_query(student_id, _existing_pq_ids)
         ChatMessage.objects.create(
             channel=ChatMessage.Channel.AGENT,
             student_id=student_id,
             sender=ChatMessage.Sender.ASSISTANT,
             content=reply or "",
+            meta=_escalation_meta(_pq),
         )
         _notify_agent_reply(student_id, agent_name, reply or "")
 
@@ -837,6 +865,8 @@ def agent_chat(request):
             "student_id": student_id,
             "reply": reply,
             "message_id": user_msg.id,
+            "pending": bool(_pq),
+            "query_id": _pq.id if _pq else None,
             "attachments": [_serialize_attachment(request, a) for a in attachments],
         })
     except Exception as exc:
@@ -896,12 +926,15 @@ def agent_chat_edit(request, message_id):
     seed_conversation(student_id, prior_turns)
 
     try:
+        _existing_pq_ids = _existing_pending_query_ids(student_id)
         agent_name, reply = run_turn(student_id, new_message, image_blocks=image_blocks or None)
+        _pq = _new_pending_query(student_id, _existing_pq_ids)
         ChatMessage.objects.create(
             channel=ChatMessage.Channel.AGENT,
             student_id=student_id,
             sender=ChatMessage.Sender.ASSISTANT,
             content=reply or "",
+            meta=_escalation_meta(_pq),
         )
         _notify_agent_reply(student_id, agent_name, reply or "")
 
@@ -911,6 +944,8 @@ def agent_chat_edit(request, message_id):
             "reply": reply,
             "message_id": target.id,
             "edited_at": target.edited_at,
+            "pending": bool(_pq),
+            "query_id": _pq.id if _pq else None,
         })
     except Exception as exc:
         return api_error(f"Agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -955,8 +990,30 @@ def agent_chat_history(request):
     messages = ChatMessage.objects.filter(
         channel=ChatMessage.Channel.AGENT, student_id=student_id
     ).prefetch_related("attachments")
+    # Escalation state, computed at read time: collect every query_id any
+    # message's meta references, fetch their current status in one query, and
+    # annotate. A message tagged escalation_pending whose query has since been
+    # answered will therefore read status "resolved" -- the app can flip the
+    # old "checking..." bubble without waiting for a new message.
+    _msgs = list(messages)
+    _qids = {
+        m.meta.get("query_id")
+        for m in _msgs
+        if isinstance(m.meta, dict) and m.meta.get("query_id") is not None
+    }
+    _status_by_id = {
+        pq.id: pq.status
+        for pq in PendingQuery.objects.filter(id__in=_qids)
+    } if _qids else {}
+
+    def _escalation(m):
+        if not (isinstance(m.meta, dict) and m.meta.get("query_id") is not None):
+            return None
+        qid = m.meta.get("query_id")
+        return {"query_id": qid, "status": _status_by_id.get(qid, "unknown")}
+
     return Response({
-        "count": messages.count(),
+        "count": len(_msgs),
         "messages": [
             {
                 "id": m.id,
@@ -965,9 +1022,10 @@ def agent_chat_history(request):
                 "created_at": m.created_at,
                 "edited_at": m.edited_at,
                 "meta": m.meta,
+                "escalation": _escalation(m),
                 "attachments": [_serialize_attachment(request, a) for a in m.attachments.all()],
             }
-            for m in messages
+            for m in _msgs
         ],
     })
 
