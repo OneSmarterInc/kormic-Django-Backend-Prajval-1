@@ -13,6 +13,9 @@ class Account(models.Model):
     class Role(models.TextChoices):
         STUDENT = "student", "Student"
         UNIVERSITY = "university", "University"
+        # Local institute, only a superuser
+        # creates these via /api/superuser/institutes/.
+        INSTITUTE = "institute", "Institute"
         # High-level operator role for project_superuser -- not selectable via
         # the public /api/auth/register/ endpoint (see RegisterSerializer),
         # only created via the create_superuser_account management command or
@@ -25,6 +28,7 @@ class Account(models.Model):
     # Only one of these is populated, depending on role.
     student_id = models.CharField(max_length=255, null=True, blank=True, unique=True, db_index=True)
     university_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    institute_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

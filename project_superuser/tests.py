@@ -12,6 +12,7 @@ from rest_framework.test import APIClient
 
 from accounts.models import Account, TOTPBackupCode, TOTPDevice
 from django_api.tests import _reset_inprocess_agent_caches, make_student_client, make_university_client
+from institutes.models import Institute
 from project_superuser.models import ActivityLog
 from universities.models import University
 
@@ -218,6 +219,119 @@ class SuperuserUniversityAPITests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["description"], "A great school.")
         self.assertTrue(resp.data["setup_status"]["has_description"])
+
+
+class SuperuserInstituteAPITests(TestCase):
+    """Mirrors SuperuserUniversityAPITests -- institutes are onboarded the
+    same way universities are, but never get an AI agent/persona setup."""
+
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.admin = make_superuser_client()
+
+    def test_admin_can_enroll_institute_with_admin_account(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {
+                "institution_name": "Test Institute",
+                "email": "institute_admin_new@example.com",
+                "password": "S3curePassw0rd!",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        institute_id = resp.data["id"]
+        self.assertTrue(Institute.objects.filter(pk=institute_id).exists())
+        self.assertTrue(Account.objects.filter(institute_id=institute_id, role=Account.Role.INSTITUTE).exists())
+
+    def test_enroll_institute_requires_admin_credentials(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {"institution_name": "Bare Institute"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Institute.objects.filter(name="Bare Institute").exists())
+
+    def test_new_institute_admin_must_enroll_own_totp(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {
+                "institution_name": "Self Enroll Institute",
+                "email": "self_enroll_institute_admin@example.com",
+                "password": "S3curePassw0rd!",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+
+        login_resp = APIClient().post(
+            "/api/auth/login/",
+            {"email": "self_enroll_institute_admin@example.com", "password": "S3curePassw0rd!"},
+            format="json",
+        )
+        self.assertEqual(login_resp.status_code, status.HTTP_200_OK)
+        self.assertTrue(login_resp.data["must_enroll_totp"])
+        self.assertEqual(login_resp.data["user"]["role"], "institute")
+
+    def test_cannot_delete_institute_with_active_admin(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {
+                "institution_name": "Guarded Institute",
+                "email": "guard_institute_admin@example.com",
+                "password": "S3curePassw0rd!",
+            },
+            format="json",
+        )
+        institute_id = resp.data["id"]
+
+        resp = self.admin.delete(f"/api/superuser/institutes/{institute_id}/")
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertTrue(Institute.objects.filter(pk=institute_id).exists())
+
+    def test_institute_detail_includes_admin_email_and_contacts(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {
+                "institution_name": "Emailed Institute",
+                "email": "institute_admin_emailed@example.com",
+                "password": "S3curePassw0rd!",
+                "name": "Jane Admin",
+                "contact_email": "info@emailed-institute.edu",
+            },
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        institute_id = resp.data["id"]
+        self.assertEqual(resp.data["admin_email"], "institute_admin_emailed@example.com")
+        self.assertEqual(resp.data["admin_name"], "Jane Admin")
+        self.assertEqual(resp.data["contact_email"], "info@emailed-institute.edu")
+
+        resp = self.admin.get(f"/api/superuser/institutes/{institute_id}/")
+        self.assertEqual(resp.data["admin_email"], "institute_admin_emailed@example.com")
+        self.assertEqual(resp.data["contact_email"], "info@emailed-institute.edu")
+
+    def test_patch_updates_institute_fields(self):
+        resp = self.admin.post(
+            "/api/superuser/institutes/",
+            {
+                "institution_name": "Patchable Institute",
+                "email": "patchable_institute_admin@example.com",
+                "password": "S3curePassw0rd!",
+            },
+            format="json",
+        )
+        institute_id = resp.data["id"]
+
+        resp = self.admin.patch(
+            f"/api/superuser/institutes/{institute_id}/",
+            {"contact_email": "info@patchable-institute.edu"},
+            format="json",
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["contact_email"], "info@patchable-institute.edu")
 
 
 class SuperuserUserManagementTests(TestCase):

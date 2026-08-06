@@ -11,6 +11,12 @@ urlpatterns = [
         views.AdminUniversityDetailAPIView.as_view(),
         name="superuser-university-detail",
     ),
+    path("institutes/", views.AdminInstituteListCreateAPIView.as_view(), name="superuser-institutes"),
+    path(
+        "institutes/<str:institute_id>/",
+        views.AdminInstituteDetailAPIView.as_view(),
+        name="superuser-institute-detail",
+    ),
     path("users/", views.AdminUserListAPIView.as_view(), name="superuser-users"),
     path(
         "users/create-superuser/",

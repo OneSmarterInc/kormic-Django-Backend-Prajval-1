@@ -39,6 +39,14 @@ class IsUniversityRole(BasePermission):
         return account is not None and account.role == Account.Role.UNIVERSITY
 
 
+class IsInstituteRole(BasePermission):
+    message = "This endpoint is only available to institute accounts."
+
+    def has_permission(self, request, view) -> bool:
+        account = get_account(request)
+        return account is not None and account.role == Account.Role.INSTITUTE
+
+
 class IsStudentOrUniversityRole(BasePermission):
     message = "This endpoint requires a student or university account."
 
@@ -75,3 +83,14 @@ class ScopedToOwnUniversityId(BasePermission):
             return True
         account = get_account(request)
         return account is not None and account.university_id == university_id
+
+
+class ScopedToOwnInstituteId(BasePermission):
+    message = "You may only access your own institute's data."
+
+    def has_permission(self, request, view) -> bool:
+        institute_id = view.kwargs.get("institute_id")
+        if institute_id is None:
+            return True
+        account = get_account(request)
+        return account is not None and account.institute_id == institute_id

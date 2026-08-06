@@ -23,8 +23,10 @@ from project_superuser.serializers import (
     KB_SYNCED_UNIVERSITY_FIELDS,
     AdminCreateStudentSerializer,
     AdminCreateSuperuserSerializer,
+    AdminEnrollInstituteSerializer,
     AdminEnrollUniversitySerializer,
 )
+from institutes.models import Institute
 from universities.models import University
 
 SUPERUSER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsSuperUserRole]
@@ -43,6 +45,7 @@ def _serialize_account(account: Account) -> Dict[str, Any]:
         "role": account.role,
         "student_id": account.student_id,
         "university_id": account.university_id,
+        "institute_id": account.institute_id,
         "is_active": user.is_active,
         "totp_enrolled": TOTPDevice.objects.filter(user=user, confirmed_at__isnull=False).exists(),
         "date_joined": user.date_joined,
@@ -280,6 +283,133 @@ class AdminUniversityDetailAPIView(APIView):
                 services.purge_university_data(university_id)
 
         run_with_retry(_do_delete)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# Institutes
+# ---------------------------------------------------------------------
+
+def _serialize_institute(institute: Institute) -> Dict[str, Any]:
+    # Exactly one admin login is created per institute today same pattern as _serialize_university.
+    admin_account = (
+        Account.objects.filter(institute_id=institute.id, role=Account.Role.INSTITUTE)
+        .select_related("user")
+        .order_by("created_at")
+        .first()
+    )
+
+    return {
+        "id": institute.id,
+        "name": institute.name,
+        "contact_email": institute.contact_email,
+        "contact_phone": institute.contact_phone,
+        "address": institute.address,
+        "admin_user_id": admin_account.user_id if admin_account else None,
+        "admin_email": admin_account.user.email if admin_account else None,
+        "admin_name": admin_account.user.first_name if admin_account else None,
+        "admin_is_active": admin_account.user.is_active if admin_account else None,
+        "admin_totp_enrolled": (
+            TOTPDevice.objects.filter(user_id=admin_account.user_id, confirmed_at__isnull=False).exists()
+            if admin_account
+            else None
+        ),
+        "created_at": institute.created_at,
+        "updated_at": institute.updated_at,
+    }
+
+
+class AdminInstituteListCreateAPIView(APIView):
+    """
+    GET /api/superuser/institutes/   ?search=<name substring>
+    POST /api/superuser/institutes/  Body:
+        {
+          "institution_name": "...",
+          "email": "...", "password": "...", "name": "...",
+          "contact_email": "...", "contact_phone": "...", "address": "..."
+        }
+    Creates the Institute plus its one admin login in a single call, same
+    pattern as AdminUniversityListCreateAPIView -- institutes upload student
+    lists for the claim flow (institutes_list) but never get an AI agent.
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def get(self, request):
+        institutes = Institute.objects.all()
+
+        search = request.query_params.get("search", "").strip()
+        if search:
+            institutes = institutes.filter(name__icontains=search)
+
+        return Response({"institutes": [_serialize_institute(i) for i in institutes]})
+
+    def post(self, request):
+        serializer = AdminEnrollInstituteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        institute = run_with_retry(serializer.save)
+        return Response(_serialize_institute(institute), status=status.HTTP_201_CREATED)
+
+
+class AdminInstituteDetailAPIView(APIView):
+    """
+    GET /api/superuser/institutes/<institute_id>/
+    PATCH /api/superuser/institutes/<institute_id>/  Body: name/contact_email/contact_phone/address
+    DELETE /api/superuser/institutes/<institute_id>/
+        Refuses (409) while admin accounts or uploaded lists still reference
+        this institute_id -- remove/reassign the admin via /api/superuser/users/
+        and the lists stay owned by the institute (UniversityStudentList.institute
+        is on_delete=PROTECT) until reassigned or removed first.
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+    PATCHABLE_FIELDS = {"name", "contact_email", "contact_phone", "address"}
+
+    def get(self, request, institute_id: str):
+        institute = Institute.objects.filter(pk=institute_id).first()
+        if institute is None:
+            return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
+        return Response(_serialize_institute(institute))
+
+    def patch(self, request, institute_id: str):
+        institute = Institute.objects.filter(pk=institute_id).first()
+        if institute is None:
+            return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
+
+        data = request.data or {}
+        touched = False
+        for field in self.PATCHABLE_FIELDS:
+            if field not in data:
+                continue
+            setattr(institute, field, data[field])
+            touched = True
+
+        if not touched:
+            return _error(f"Provide at least one of: {', '.join(sorted(self.PATCHABLE_FIELDS))}.")
+
+        institute.save()
+        return Response(_serialize_institute(institute))
+
+    def delete(self, request, institute_id: str):
+        institute = Institute.objects.filter(pk=institute_id).first()
+        if institute is None:
+            return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
+
+        if Account.objects.filter(institute_id=institute_id, role=Account.Role.INSTITUTE).exists():
+            return _error(
+                "This institute still has an admin account. Remove or reassign it via "
+                "/api/superuser/users/ first.",
+                status.HTTP_409_CONFLICT,
+            )
+
+        from institutes_list.models import UniversityStudentList
+
+        if UniversityStudentList.objects.filter(institute_id=institute_id).exists():
+            return _error(
+                "This institute still has uploaded student lists and cannot be deleted.",
+                status.HTTP_409_CONFLICT,
+            )
+
+        institute.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 

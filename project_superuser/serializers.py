@@ -191,3 +191,57 @@ class AdminEnrollUniversitySerializer(serializers.Serializer):
             Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university_id=university.id)
 
         return university
+
+
+class AdminEnrollInstituteSerializer(serializers.Serializer):
+    """The only way an institute gets onto the platform: a superuser
+    registers the Institute (mirrors institutes.services.register_institute)
+    together with its one admin login, in a single call -- same shape as
+    AdminEnrollUniversitySerializer above. There is no self-registration
+    path. TOTP enrollment is NOT done here: the institute completes that
+    itself on first login, same as every other role."""
+
+    institution_name = serializers.CharField()
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True)
+    name = serializers.CharField(required=False, allow_blank=True, default="")
+    contact_email = serializers.CharField(required=False, allow_blank=True, default="")
+    contact_phone = serializers.CharField(required=False, allow_blank=True, default="")
+    address = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_institution_name(self, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("institution_name cannot be blank.")
+        return value
+
+    def validate_email(self, value: str) -> str:
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("An account with this email already exists.")
+        return value
+
+    def validate_password(self, value: str) -> str:
+        validate_password(value)
+        return value
+
+    def create(self, validated_data):
+        from institutes.services import register_institute
+
+        with transaction.atomic():
+            institute = register_institute(
+                validated_data["institution_name"],
+                contact_email=validated_data.get("contact_email", ""),
+                contact_phone=validated_data.get("contact_phone", ""),
+                address=validated_data.get("address", ""),
+            )
+
+            email = validated_data["email"]
+            admin_user = User.objects.create_user(
+                username=email,
+                email=email,
+                password=validated_data["password"],
+                first_name=validated_data.get("name", "")[:150],
+            )
+            Account.objects.create(user=admin_user, role=Account.Role.INSTITUTE, institute_id=institute.id)
+
+        return institute

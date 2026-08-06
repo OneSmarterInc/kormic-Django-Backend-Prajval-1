@@ -57,8 +57,10 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
     'accounts',
     'django_api',
+    'institutes_list',
     'verification',
     'universities',
+    'institutes',
     'notifications',
     'project_superuser',
     'url_discovery',
@@ -262,3 +264,11 @@ else:
     EMAIL_HOST_USER = os.environ["EMAIL_HOST_USER"]
     EMAIL_HOST_PASSWORD = os.environ["EMAIL_HOST_PASSWORD"]
     DEFAULT_FROM_EMAIL = os.environ["DEFAULT_FROM_EMAIL"]
+
+# Frontend page the claim-invite email links to, e.g. "https://app.kormic.com/claim"
+# (the student lands there with ?token=... and the page calls /api/claim/start/).
+# No sane default exists -- it's a frontend URL we don't own -- so
+# institutes_list.views.send_invites fails loudly if this is unset rather
+# than emailing a broken link, same intentional-fail-loud pattern as the
+# EMAIL_BACKEND requirement above.
+CLAIM_PAGE_URL = os.getenv("CLAIM_PAGE_URL", "")

@@ -136,6 +136,7 @@ def serialize_user(user: User) -> dict:
         "role": account.role if account else None,
         "student_id": account.student_id if account else None,
         "university_id": account.university_id if account else None,
+        "institute_id": account.institute_id if account else None,
         "totp_enrolled": totp_enrolled,
     }
 
