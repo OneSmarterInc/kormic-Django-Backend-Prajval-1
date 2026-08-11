@@ -62,6 +62,10 @@ class UniversityAgent:
         self.persona = build_persona_dict(university)
         self.kb = UniversityKnowledgeBase(university_id)
 
+        from agents.identity_registry import university_identity
+
+        university_identity(university_id, self.persona["agent_name"])
+
         seed_facts = self.persona.get("key_facts_seed", [])
 
         for fact in seed_facts:
@@ -343,6 +347,9 @@ university or program; you already know it.
             "urgency_reason": query.urgency_reason,
             "display_status": query.display_status,
             "escalation_chain": query.escalation_chain,
+            "group": query.group.slug if query.group_id else None,
+            "routed_to_name": query.routed_to_name,
+            "routed_to_email": query.routed_to_email,
             "answer": query.answer,
             "answered_by": query.answered_by,
             "answered_at": query.answered_at.isoformat() if query.answered_at else None,
@@ -482,6 +489,7 @@ STUDENT CONTEXT:
             return existing_query
 
         from django_api.models import PendingQuery
+        from universities.knowledge_groups import resolve_group_for_question
 
         student_context = student_context or {}
 
@@ -505,6 +513,13 @@ STUDENT CONTEXT:
             "No urgency reason available.",
         )
 
+        # A1: route to the matching knowledge group's named contact -- a
+        # university with no groups configured yet still creates the
+        # PendingQuery (group=None), it just isn't routed anywhere specific.
+        group = resolve_group_for_question(self.university_id, question)
+        routed_to_name = group.escalation_contact_name if group else ""
+        routed_to_email = group.escalation_contact_email if group else ""
+
         escalation_chain = [
             {"step": "Student asked Aria", "resolved": True},
             {
@@ -515,6 +530,14 @@ STUDENT CONTEXT:
             {
                 "step": f"Urgency classified as {priority}: {urgency_reason}",
                 "resolved": True,
+            },
+            {
+                "step": (
+                    f"Routed to {group.get_slug_display()} ({routed_to_name} <{routed_to_email}>)"
+                    if group
+                    else "No knowledge group configured for this university -- not routed to a named contact"
+                ),
+                "resolved": bool(group),
             },
         ]
 
@@ -529,6 +552,9 @@ STUDENT CONTEXT:
             priority=priority,
             urgency_reason=urgency_reason,
             escalation_chain=escalation_chain,
+            group=group,
+            routed_to_name=routed_to_name,
+            routed_to_email=routed_to_email,
         )
 
         return self._serialize_pending_query(query)

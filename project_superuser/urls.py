@@ -40,4 +40,9 @@ urlpatterns = [
         name="superuser-user-revoke-sessions",
     ),
     path("audit-log/", views.ActivityLogListAPIView.as_view(), name="superuser-audit-log"),
+    path(
+        "metrics/escalations/",
+        views.PilotEscalationMetricsAPIView.as_view(),
+        name="superuser-metrics-escalations",
+    ),
 ]

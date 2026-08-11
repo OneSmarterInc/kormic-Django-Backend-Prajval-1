@@ -59,9 +59,12 @@ def generate_unique_agent_name() -> str:
 def ensure_agent_name(profile) -> str:
     """Assign a default agent name to a StudentProfile row if it doesn't
     have one yet, and return the resolved name."""
-    if profile.agent_name:
-        return profile.agent_name
+    if not profile.agent_name:
+        profile.agent_name = generate_unique_agent_name()
+        profile.save(update_fields=["agent_name", "updated_at"])
 
-    profile.agent_name = generate_unique_agent_name()
-    profile.save(update_fields=["agent_name", "updated_at"])
+    from agents.identity_registry import student_identity
+
+    student_identity(profile.student_id, profile.agent_name)
+
     return profile.agent_name

@@ -11,10 +11,12 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from accounts.models import Account, TOTPBackupCode, TOTPDevice
+from django_api.models import PendingQuery
 from django_api.tests import _reset_inprocess_agent_caches, make_student_client, make_university_client
 from institutes.models import Institute
 from project_superuser.models import ActivityLog
-from universities.models import University
+from universities.knowledge_groups import ensure_default_groups
+from universities.models import KnowledgeGroup, University
 
 
 def make_superuser_client(email="root@example.com", password="S3curePassw0rd!"):
@@ -637,3 +639,80 @@ class AuthActivityLoggingTests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertTrue(any(e["target_email"] == "rolefilter_officer@wsu.edu" for e in resp.data["entries"]))
         self.assertFalse(any(e["target_email"] == "rolefilter_student@example.com" for e in resp.data["entries"]))
+
+
+class PilotEscalationMetricsTests(TestCase):
+    """
+    A4: escalations per student per week is the headline number the Fall
+    pilot is measured by. PendingQuery.created_at is auto_now_add, so tests
+    backdate rows via a queryset .update() (which bypasses auto_now_add)
+    rather than mocking the clock.
+    """
+
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.admin = make_superuser_client()
+        self.university = University.objects.create(id="metrics_u", name="Metrics University")
+        ensure_default_groups(self.university)
+        self.money_group = self.university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
+
+    def _backdated_query(self, *, student_id, days_ago, group=None):
+        query = PendingQuery.objects.create(
+            university_id=self.university.id,
+            student_id=student_id,
+            question="q",
+            group=group,
+        )
+        PendingQuery.objects.filter(id=query.id).update(
+            created_at=datetime.now(dt_timezone.utc) - timedelta(days=days_ago)
+        )
+        return query
+
+    def test_escalations_per_student_per_week_and_group_breakdown(self):
+        # Same day (not just "recent") so both land in the same TruncWeek
+        # bucket regardless of which day of the week the suite runs on --
+        # 1 vs 2 days ago can straddle a Monday week boundary and land in
+        # different buckets.
+        self._backdated_query(student_id="s1", days_ago=1, group=self.money_group)
+        self._backdated_query(student_id="s2", days_ago=1)
+        # Outside the default 12-week window entirely -- must not be counted.
+        self._backdated_query(student_id="s3", days_ago=200)
+
+        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.id}")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["university_id"], self.university.id)
+
+        total_escalations = sum(week["total_escalations"] for week in resp.data["weeks"])
+        self.assertEqual(total_escalations, 2)
+
+        this_week = next(week for week in resp.data["weeks"] if week["total_escalations"] > 0)
+        self.assertEqual(this_week["distinct_students"], 2)
+        self.assertEqual(this_week["escalations_per_student"], 1.0)
+        self.assertEqual(this_week["by_group"], {"money": 1})
+
+    def test_blank_student_id_excluded_from_denominator_not_from_total(self):
+        self._backdated_query(student_id="", days_ago=1)
+
+        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.id}")
+        this_week = next(week for week in resp.data["weeks"] if week["total_escalations"] > 0)
+        self.assertEqual(this_week["total_escalations"], 1)
+        self.assertEqual(this_week["distinct_students"], 0)
+        self.assertEqual(this_week["escalations_per_student"], 0.0)
+
+    def test_no_data_returns_flat_zero_weeks_not_an_error(self):
+        resp = self.admin.get("/api/superuser/metrics/escalations/?university_id=some_other_university")
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data["weeks"], [])
+
+    def test_omitting_university_id_combines_every_university(self):
+        other_university = University.objects.create(id="metrics_u2", name="Second Metrics University")
+        self._backdated_query(student_id="s1", days_ago=1)
+        PendingQuery.objects.filter(university_id=self.university.id).update(university_id=self.university.id)
+        query = PendingQuery.objects.create(university_id=other_university.id, student_id="s2", question="q")
+        PendingQuery.objects.filter(id=query.id).update(created_at=datetime.now(dt_timezone.utc) - timedelta(days=1))
+
+        resp = self.admin.get("/api/superuser/metrics/escalations/")
+        self.assertEqual(resp.data["university_id"], "all")
+        total_escalations = sum(week["total_escalations"] for week in resp.data["weeks"])
+        self.assertEqual(total_escalations, 2)

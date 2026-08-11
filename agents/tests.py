@@ -3,9 +3,11 @@ from unittest import mock
 
 from django.test import TestCase
 
+from agents import identity_registry
 from agents.university_agent import UniversityAgent
-from django_api.models import PendingQuery
-from universities.models import University
+from django_api.models import AgentConversationLog, AgentIdentity, PendingQuery
+from universities.knowledge_groups import ensure_default_groups
+from universities.models import KnowledgeGroup, University
 
 
 def _fake_response(payload: dict):
@@ -146,3 +148,109 @@ class UniversityAgentOfficerGuardrailTests(TestCase):
 
         self.assertTrue(result["pending"])
         self.assertEqual(PendingQuery.objects.count(), 1)
+
+
+class UniversityAgentEscalationRoutingTests(TestCase):
+    """
+    A1: an escalation must route to the matching knowledge group's named
+    contact, not just create an undifferentiated PendingQuery.
+    """
+
+    def setUp(self):
+        self.university = University.objects.create(id="wsu_money", name="Write State", agent_name="Nova3")
+        ensure_default_groups(self.university)
+        self.money_group = self.university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
+        self.money_group.escalation_contact_name = "Bursar Office"
+        self.money_group.escalation_contact_email = "bursar@wsu.edu"
+        self.money_group.save()
+        self.agent = UniversityAgent("wsu_money", auto_scrape=False)
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_escalation_routes_to_matching_group_contact(self, mock_client):
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "I don't know.",
+            "confidence": 0.0,
+            "unsupported_topics": [],
+        })
+
+        result = self.agent.answer("What is the assistantship stipend?")
+
+        query = PendingQuery.objects.get(id=result["pending_query"]["query_id"])
+        self.assertEqual(query.group_id, self.money_group.id)
+        self.assertEqual(query.routed_to_name, "Bursar Office")
+        self.assertEqual(query.routed_to_email, "bursar@wsu.edu")
+        self.assertEqual(result["pending_query"]["group"], "money")
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_escalation_still_created_when_no_groups_configured(self, mock_client):
+        University.objects.create(id="no_groups_u", name="No Groups University", agent_name="Nova6")
+        agent = UniversityAgent("no_groups_u", auto_scrape=False)
+
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "I don't know.",
+            "confidence": 0.0,
+            "unsupported_topics": [],
+        })
+
+        result = agent.answer("What is the deadline?")
+
+        query = PendingQuery.objects.get(id=result["pending_query"]["query_id"])
+        self.assertIsNone(query.group)
+        self.assertEqual(query.routed_to_email, "")
+
+
+class AgentIdentityAndConversationLogTests(TestCase):
+    """
+    A3: every agent gets a durable birth record, and every agent-to-agent
+    exchange writes a first-class, queryable log row.
+    """
+
+    def setUp(self):
+        University.objects.create(id="identity_u", name="Identity University", agent_name="Nova4")
+
+    def test_university_agent_construction_creates_birth_record(self):
+        UniversityAgent("identity_u", auto_scrape=False)
+
+        identity = AgentIdentity.objects.get(owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id="identity_u")
+        self.assertEqual(identity.agent_name, "Nova4")
+
+    def test_log_conversation_creates_row_and_lazily_creates_identities(self):
+        log = identity_registry.log_conversation(
+            student_id="student_abc",
+            university_id="identity_u",
+            question="What is the deadline?",
+            answer="March 1.",
+            knowledge_source="conversation",
+            confidence=0.9,
+        )
+
+        self.assertIsNotNone(log)
+        self.assertEqual(AgentConversationLog.objects.count(), 1)
+        self.assertTrue(
+            AgentIdentity.objects.filter(owner_type=AgentIdentity.OwnerType.STUDENT, owner_id="student_abc").exists()
+        )
+        self.assertTrue(
+            AgentIdentity.objects.filter(
+                owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id="identity_u"
+            ).exists()
+        )
+
+    def test_log_conversation_skips_without_student_id(self):
+        result = identity_registry.log_conversation(
+            student_id="",
+            university_id="identity_u",
+            question="q",
+            answer="a",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(AgentConversationLog.objects.count(), 0)
+
+    def test_get_or_create_identity_is_idempotent_and_updates_name(self):
+        first = identity_registry.student_identity("student_xyz", "Aria")
+        second = identity_registry.student_identity("student_xyz", "Nova")
+
+        self.assertEqual(first.agent_id, second.agent_id)
+        second.refresh_from_db()
+        self.assertEqual(second.agent_name, "Nova")
+        self.assertEqual(AgentIdentity.objects.filter(owner_id="student_xyz").count(), 1)

@@ -156,10 +156,21 @@ def add_manual_knowledge_fact(
     content: str,
     confidence: float = 1.0,
     source_url: Optional[str] = None,
+    group_slug: Optional[str] = None,
 ) -> "Any":
     """Admin-entered fact, always stored as source_type="manual" regardless
     of caller input -- the direct write path that used to only exist
     reactively via resolving a PendingQuery."""
+    group_id = None
+    if group_slug:
+        from universities.models import KnowledgeGroup
+
+        group_id = (
+            KnowledgeGroup.objects.filter(university_id=university_id, slug=group_slug)
+            .values_list("id", flat=True)
+            .first()
+        )
+
     kb = _kb_for(university_id)
     return kb.store(
         topic=topic,
@@ -167,6 +178,7 @@ def add_manual_knowledge_fact(
         source_type="manual",
         source_url=source_url,
         confidence=confidence,
+        group_id=group_id,
     )
 
 

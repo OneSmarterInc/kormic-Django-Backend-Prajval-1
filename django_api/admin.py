@@ -1,6 +1,8 @@
 from django.contrib import admin
 
 from django_api.models import (
+    AgentConversationLog,
+    AgentIdentity,
     ChatAttachment,
     ChatMessage,
     FitAssessment,
@@ -68,3 +70,17 @@ class FitAssessmentAdmin(admin.ModelAdmin):
 class RoadmapVersionAdmin(admin.ModelAdmin):
     list_display = ("student", "created_at")
     search_fields = ("student__student_id",)
+
+
+@admin.register(AgentIdentity)
+class AgentIdentityAdmin(admin.ModelAdmin):
+    list_display = ("agent_id", "owner_type", "owner_id", "agent_name", "created_at")
+    search_fields = ("owner_id", "agent_name")
+    list_filter = ("owner_type",)
+
+
+@admin.register(AgentConversationLog)
+class AgentConversationLogAdmin(admin.ModelAdmin):
+    list_display = ("asker", "responder", "knowledge_source", "confidence", "created_at")
+    search_fields = ("asker__owner_id", "responder__owner_id", "question")
+    list_filter = ("knowledge_source",)

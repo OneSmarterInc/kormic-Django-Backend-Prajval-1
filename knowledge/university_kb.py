@@ -20,6 +20,7 @@ class KnowledgeEntry:
         confidence: float = 1.0,
         learned_at: Optional[str] = None,
         times_used: int = 0,
+        group_id: Optional[int] = None,
     ):
         self.topic = str(topic or "").strip()
         self.content = str(content or "").strip()
@@ -28,6 +29,7 @@ class KnowledgeEntry:
         self.confidence = self._safe_confidence(confidence)
         self.learned_at = learned_at or datetime.now().isoformat()
         self.times_used = int(times_used or 0)
+        self.group_id = group_id
         self.search_score = 0.0
         self.db_id: Optional[int] = None
 
@@ -48,6 +50,7 @@ class KnowledgeEntry:
             "confidence": self.confidence,
             "learned_at": self.learned_at,
             "times_used": self.times_used,
+            "group_id": self.group_id,
         }
 
     @classmethod
@@ -61,6 +64,7 @@ class KnowledgeEntry:
             confidence=data.get("confidence", 1.0),
             learned_at=data.get("learned_at"),
             times_used=data.get("times_used", 0),
+            group_id=data.get("group_id"),
         )
 
     def __repr__(self) -> str:
@@ -175,6 +179,7 @@ class UniversityKnowledgeBase:
                 confidence=row.confidence,
                 learned_at=row.created_at.isoformat(),
                 times_used=row.times_used,
+                group_id=row.group_id,
             )
             entry.db_id = row.id
             self.entries.append(entry)
@@ -185,6 +190,7 @@ class UniversityKnowledgeBase:
         if create or not entry.db_id:
             row = UniversityKnowledgeEntry.objects.create(
                 university_id=self.university_id,
+                group_id=entry.group_id,
                 topic=entry.topic,
                 content=entry.content,
                 source_type=entry.source_type,
@@ -194,12 +200,15 @@ class UniversityKnowledgeBase:
             )
             entry.db_id = row.id
         else:
-            UniversityKnowledgeEntry.objects.filter(id=entry.db_id).update(
-                source_type=entry.source_type,
-                source_url=entry.source_url,
-                confidence=entry.confidence,
-                times_used=entry.times_used,
-            )
+            update_fields = {
+                "source_type": entry.source_type,
+                "source_url": entry.source_url,
+                "confidence": entry.confidence,
+                "times_used": entry.times_used,
+            }
+            if entry.group_id is not None:
+                update_fields["group_id"] = entry.group_id
+            UniversityKnowledgeEntry.objects.filter(id=entry.db_id).update(**update_fields)
 
     # ------------------------------------------------------------------
     # Storage
@@ -227,12 +236,15 @@ class UniversityKnowledgeBase:
         source_url: Optional[str] = None,
         confidence: float = 1.0,
         allow_duplicates: bool = False,
+        group_id: Optional[int] = None,
     ) -> KnowledgeEntry:
         """
         Add a new knowledge entry.
 
         If the same topic/content already exists, update confidence/source metadata
-        instead of adding duplicates.
+        instead of adding duplicates. group_id (A1) tags which knowledge group
+        this fact belongs to -- optional, and only ever fills in a duplicate's
+        missing group, never overwrites one it already has.
         """
         topic = str(topic or "").strip()
         content = str(content or "").strip()
@@ -257,6 +269,10 @@ class UniversityKnowledgeBase:
                     duplicate.source_url = source_url
                     changed = True
 
+                if group_id is not None and duplicate.group_id is None:
+                    duplicate.group_id = group_id
+                    changed = True
+
                 # Prefer stronger source types.
                 old_priority = self.SOURCE_PRIORITY.get(duplicate.source_type, 0.5)
                 new_priority = self.SOURCE_PRIORITY.get(str(source_type or "").lower(), 0.5)
@@ -276,6 +292,7 @@ class UniversityKnowledgeBase:
             source_type=source_type,
             source_url=source_url,
             confidence=confidence,
+            group_id=group_id,
         )
 
         self.entries.append(entry)
@@ -297,6 +314,7 @@ class UniversityKnowledgeBase:
                     source_type=fact.get("source_type", "seed"),
                     source_url=fact.get("source_url"),
                     confidence=fact.get("confidence", 1.0),
+                    group_id=fact.get("group_id"),
                 )
                 count += 1
             except ValueError:

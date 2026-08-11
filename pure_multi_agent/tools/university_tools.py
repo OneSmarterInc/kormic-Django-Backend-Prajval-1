@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.tools import tool
 from rich.console import Console
 
-from agents import commons
+from agents import commons, identity_registry
 from pure_multi_agent import university_graph
 
 console = Console()
@@ -80,6 +80,12 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
 
         if result.get("error") != "unknown_university_id":
             commons.record_university_interest(ctx["canonical_student_id"], university_id, "searched")
+            identity_registry.log_exchange_from_result(
+                student_id=ctx["canonical_student_id"],
+                university_id=university_id,
+                question=question,
+                result=result,
+            )
 
         agent_label = commons.get_university_agent_label(university_id)
         return _format_result(result, agent_label)
@@ -126,6 +132,12 @@ def build_tools(ctx: Dict[str, Any]) -> List[Any]:
         for university_id, result in zip(target_ids, results):
             if result.get("error") != "unknown_university_id":
                 commons.record_university_interest(ctx["canonical_student_id"], university_id, "searched")
+                identity_registry.log_exchange_from_result(
+                    student_id=ctx["canonical_student_id"],
+                    university_id=university_id,
+                    question=question,
+                    result=result,
+                )
 
             agent_label = result.get("agent_name", "University Agent")
             university_name = result.get("university", "Unknown University")

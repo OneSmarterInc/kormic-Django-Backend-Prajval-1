@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
@@ -12,7 +12,8 @@ from rest_framework.views import APIView
 from accounts.permissions import IsTOTPEnrolled, IsUniversityRole, get_account
 from universities import services
 from universities.identity import is_agent_name_available
-from universities.models import University
+from universities.knowledge_groups import ensure_default_groups, escalation_counts_by_group
+from universities.models import KnowledgeGroup, University
 
 UNIVERSITY_ADMIN_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole]
 
@@ -92,7 +93,20 @@ def _serialize_knowledge_entry(entry) -> Dict[str, Any]:
         "source_url": entry.source_url,
         "confidence": entry.confidence,
         "times_used": entry.times_used,
+        "group": entry.group.slug if entry.group_id else None,
         "created_at": entry.created_at,
+    }
+
+
+def _serialize_knowledge_group(group, escalation_counts: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+    counts = escalation_counts or {}
+    return {
+        "slug": group.slug,
+        "label": group.get_slug_display(),
+        "escalation_contact_name": group.escalation_contact_name,
+        "escalation_contact_email": group.escalation_contact_email,
+        "escalation_count": counts.get(group.slug, 0),
+        "updated_at": group.updated_at,
     }
 
 
@@ -484,8 +498,12 @@ class KnowledgeFactListCreateAPIView(APIView):
 
         from django_api.models import UniversityKnowledgeEntry
 
+        group_slug = str(request.data.get("group", "")).strip() or None
+        if group_slug and group_slug not in KnowledgeGroup.Slug.values:
+            return _error(f"group must be one of: {', '.join(KnowledgeGroup.Slug.values)}.")
+
         entry = services.add_manual_knowledge_fact(
-            university.id, topic, content, confidence=confidence
+            university.id, topic, content, confidence=confidence, group_slug=group_slug
         )
         # add_manual_knowledge_fact returns the KB wrapper's in-memory
         # KnowledgeEntry (has .db_id, not .id) -- re-fetch the real row so
@@ -632,3 +650,66 @@ class KnowledgeFactDetailAPIView(APIView):
 
         entry.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class KnowledgeGroupListAPIView(APIView):
+    """
+    GET /api/university-admin/knowledge-groups/
+  
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        ensure_default_groups(university)
+        counts = escalation_counts_by_group(university.id)
+        groups = university.knowledge_groups.all()
+
+        return Response({
+            "groups": [_serialize_knowledge_group(group, counts) for group in groups],
+        })
+
+
+class KnowledgeGroupDetailAPIView(APIView):
+    """
+    PATCH /api/university-admin/knowledge-groups/<slug>/
+        Body: any of {"escalation_contact_name": "...", "escalation_contact_email": "..."}
+    Updates one group's escalation contact. 404s if the group doesn't exist
+    yet for this university -- GET the list first to lazily create the four
+    defaults.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def patch(self, request, slug: str):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        group = university.knowledge_groups.filter(slug=slug).first()
+        if group is None:
+            return _error("Knowledge group not found.", status.HTTP_404_NOT_FOUND)
+
+        data = request.data or {}
+        update_fields = []
+
+        if "escalation_contact_name" in data:
+            group.escalation_contact_name = str(data["escalation_contact_name"]).strip()
+            update_fields.append("escalation_contact_name")
+
+        if "escalation_contact_email" in data:
+            group.escalation_contact_email = str(data["escalation_contact_email"]).strip()
+            update_fields.append("escalation_contact_email")
+
+        if not update_fields:
+            return _error("Provide at least one of escalation_contact_name, escalation_contact_email to update.")
+
+        update_fields.append("updated_at")
+        group.save(update_fields=update_fields)
+
+        counts = escalation_counts_by_group(university.id)
+        return Response(_serialize_knowledge_group(group, counts))

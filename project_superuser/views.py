@@ -667,3 +667,26 @@ class ActivityLogListAPIView(APIView):
                 for entry in entries[:limit]
             ]
         })
+
+
+class PilotEscalationMetricsAPIView(APIView):
+    """
+    GET /api/superuser/metrics/escalations/
+        ?university_id=<id>   (optional -- omit to combine every university)
+        &weeks=<n>             (optional, default 12, max 52)
+    A4: the number the Fall pilot is measured by -- escalations per student
+    per week, broken down by knowledge group, over time. Flat/zero weeks
+    are returned as-is (real numbers, pre-pilot flat is expected and fine).
+    """
+
+    permission_classes = SUPERUSER_PERMISSIONS
+
+    def get(self, request):
+        university_id = request.query_params.get("university_id", "").strip()
+
+        try:
+            weeks = int(request.query_params.get("weeks", 12))
+        except ValueError:
+            return _error("weeks must be an integer.")
+
+        return Response(services.escalation_metrics(university_id=university_id, weeks=weeks))

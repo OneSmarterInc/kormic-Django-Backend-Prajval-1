@@ -1,3 +1,5 @@
+import uuid
+
 from django.db import models
 
 
@@ -312,6 +314,14 @@ class UniversityKnowledgeEntry(models.Model):
     """
 
     university_id = models.CharField(max_length=255, db_index=True)
+  
+    group = models.ForeignKey(
+        "universities.KnowledgeGroup",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="knowledge_entries",
+    )
     topic = models.CharField(max_length=500)
     content = models.TextField()
     source_type = models.CharField(max_length=50, default="unknown")
@@ -348,6 +358,16 @@ class PendingQuery(models.Model):
     student_id = models.CharField(max_length=255, blank=True, default="", db_index=True)
     student_name = models.CharField(max_length=255, blank=True, default="")
     program = models.CharField(max_length=255, blank=True, default="")
+
+    group = models.ForeignKey(
+        "universities.KnowledgeGroup",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="escalations",
+    )
+    routed_to_name = models.CharField(max_length=255, blank=True, default="")
+    routed_to_email = models.CharField(max_length=255, blank=True, default="")
     question = models.TextField()
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
     priority = models.CharField(max_length=20, choices=Priority.choices, default=Priority.NORMAL)
@@ -435,3 +455,68 @@ class PresenterAuditLog(models.Model):
 
     def __str__(self) -> str:
         return f"PresenterAuditLog({self.event}, {self.created_at})"
+
+
+class AgentIdentity(models.Model):
+    """
+    The birth record for one agent -- student or university -- created once,
+    lazily, the first time that agent is actually used (see
+    agents.identity_registry.get_or_create_identity(), called from
+    agents.agent_identity.ensure_agent_name() for students and
+    agents.university_agent.UniversityAgent.__init__() for universities).
+    Never mutated except agent_name drifting to match a rename; agent_id and
+    created_at are permanent -- this is the durable, sealed half of the
+    "sealed identity, tamper-evident history" claim, with
+    AgentConversationLog as the tamper-evident history half.
+    """
+
+    class OwnerType(models.TextChoices):
+        STUDENT = "student", "Student"
+        UNIVERSITY = "university", "University"
+
+    agent_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner_type = models.CharField(max_length=20, choices=OwnerType.choices, db_index=True)
+    # StudentProfile.student_id or University.id -- deliberately a plain
+    # string FK-by-convention (not a real FK) so an identity row, once
+    # created, is never cascade-deleted by profile/university churn.
+    owner_id = models.CharField(max_length=255, db_index=True)
+    agent_name = models.CharField(max_length=255, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["owner_type", "owner_id"], name="uq_agent_identity_owner"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AgentIdentity({self.owner_type}, {self.owner_id})"
+
+
+class AgentConversationLog(models.Model):
+    """
+    One first-class row per agent-to-agent exchange -- currently the
+    student-agent -> university-agent path (pure_multi_agent.tools.
+    university_tools.ask_university / compare_all_universities). Rows are
+    append-only: who asked whom, what, answered from which knowledge
+    source, when. This is what agents.agent_identity / AgentIdentity was
+    missing on its own -- an identity record proves an agent exists, this
+    proves what it actually did.
+    """
+
+    asker = models.ForeignKey(AgentIdentity, on_delete=models.CASCADE, related_name="asked_conversations")
+    responder = models.ForeignKey(AgentIdentity, on_delete=models.CASCADE, related_name="answered_conversations")
+    question = models.TextField()
+    answer = models.TextField()
+    # e.g. "human_verified", "conversation", "kb_search", "pending" --
+    # mirrors the source/trust.source_type values agents.university_agent
+    # already returns from answer().
+    knowledge_source = models.CharField(max_length=50, blank=True, default="")
+    confidence = models.FloatField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"AgentConversationLog({self.asker_id} -> {self.responder_id}, {self.created_at})"

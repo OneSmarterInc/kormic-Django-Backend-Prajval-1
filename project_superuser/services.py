@@ -12,8 +12,18 @@ ones (register/login/logout) that accounts.views logs on the same model.
 """
 
 
+def _purge_agent_identity(owner_type: str, owner_id: str) -> None:
+    """AgentIdentity (A3) is owner_type/owner_id, not a real FK to
+    StudentProfile/University, so it needs the same manual purge as the
+    other loose-string-keyed rows in this module. Deleting the identity
+    cascades its AgentConversationLog rows (both asker and responder FKs)."""
+    from django_api.models import AgentIdentity
+
+    AgentIdentity.objects.filter(owner_type=owner_type, owner_id=owner_id).delete()
+
+
 def purge_student_data(student_id: str) -> None:
-    from django_api.models import AriaMemory, ChatMessage, IntakeSession, StudentProfile
+    from django_api.models import AgentIdentity, AriaMemory, ChatMessage, IntakeSession, StudentProfile
 
     # Cascades ResumeUpload/GitHubAnalysis/LinkedInAnalysis/FitAssessment/
     # RoadmapVersion, which are real FKs to StudentProfile.
@@ -21,10 +31,12 @@ def purge_student_data(student_id: str) -> None:
     AriaMemory.objects.filter(student_id=student_id).delete()
     IntakeSession.objects.filter(student_id=student_id).delete()
     ChatMessage.objects.filter(student_id=student_id).delete()
+    _purge_agent_identity(AgentIdentity.OwnerType.STUDENT, student_id)
 
 
 def purge_university_data(university_id: str) -> None:
     from django_api.models import (
+        AgentIdentity,
         ChatMessage,
         PendingQuery,
         PresenterAuditLog,
@@ -39,6 +51,9 @@ def purge_university_data(university_id: str) -> None:
     UniversityQuestionLog.objects.filter(university_id=university_id).delete()
     PresenterAuditLog.objects.filter(university_id=university_id).delete()
     ChatMessage.objects.filter(university_id=university_id).delete()
+    _purge_agent_identity(AgentIdentity.OwnerType.UNIVERSITY, university_id)
+    # KnowledgeGroup cascades off University itself (real FK) -- no manual
+    # cleanup needed here.
 
 
 def revoke_all_sessions(user) -> int:
@@ -56,6 +71,69 @@ def revoke_all_sessions(user) -> int:
         BlacklistedToken.objects.get_or_create(token=token)
         count += 1
     return count
+
+
+def escalation_metrics(university_id: str = "", weeks: int = 12) -> dict:
+    """
+    A4: the Fall-pilot headline number -- escalations per student per week,
+    broken down by knowledge group, over time. Reads PendingQuery directly
+    (every escalation is already a durable, queryable row); nothing new is
+    persisted for this. university_id="" combines every university in the
+    pilot into one series; weeks is clamped to [1, 52].
+    """
+    from django.db.models import Count, Q
+    from django.db.models.functions import TruncWeek
+    from django.utils import timezone
+
+    from django_api.models import PendingQuery
+
+    weeks = max(1, min(int(weeks or 12), 52))
+    since = timezone.now() - timezone.timedelta(weeks=weeks)
+
+    queryset = PendingQuery.objects.filter(created_at__gte=since)
+    if university_id:
+        queryset = queryset.filter(university_id=university_id)
+
+    weekly_rows = (
+        queryset.annotate(week=TruncWeek("created_at"))
+        .values("week")
+        .annotate(
+            total_escalations=Count("id"),
+            # A blank student_id (no student context on the call) can't be
+            # attributed to a student-week rate, so it's excluded from the
+            # denominator but still counted in total_escalations above.
+            distinct_students=Count("student_id", filter=~Q(student_id=""), distinct=True),
+        )
+        .order_by("week")
+    )
+
+    group_rows = (
+        queryset.annotate(week=TruncWeek("created_at"))
+        .exclude(group__isnull=True)
+        .values("week", "group__slug")
+        .annotate(count=Count("id"))
+    )
+    by_group_per_week: dict = {}
+    for row in group_rows:
+        by_group_per_week.setdefault(row["week"], {})[row["group__slug"]] = row["count"]
+
+    weeks_out = []
+    for row in weekly_rows:
+        total = row["total_escalations"]
+        distinct_students = row["distinct_students"]
+        weeks_out.append({
+            "week_start": row["week"].date().isoformat() if row["week"] else None,
+            "total_escalations": total,
+            "distinct_students": distinct_students,
+            "escalations_per_student": round(total / distinct_students, 2) if distinct_students else 0.0,
+            "by_group": by_group_per_week.get(row["week"], {}),
+        })
+
+    return {
+        "university_id": university_id or "all",
+        "weeks_requested": weeks,
+        "weeks": weeks_out,
+    }
 
 
 def log_activity(
