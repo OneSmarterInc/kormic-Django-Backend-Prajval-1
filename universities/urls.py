@@ -37,6 +37,16 @@ urlpatterns = [
         views.AutoDiscoverApplyAPIView.as_view(),
         name="university-admin-auto-discover-apply",
     ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/clusters/",
+        views.AutoDiscoverClusterMapAPIView.as_view(),
+        name="university-admin-auto-discover-clusters",
+    ),
+    path(
+        "scrape-urls/auto-discover/<int:job_id>/clusters/<str:category>/approve/",
+        views.AutoDiscoverClusterApproveAPIView.as_view(),
+        name="university-admin-auto-discover-cluster-approve",
+    ),
     path("knowledge/", views.KnowledgeFactListCreateAPIView.as_view(), name="university-admin-knowledge"),
     path(
         "knowledge/sections/",

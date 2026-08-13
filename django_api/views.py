@@ -1291,6 +1291,7 @@ class PendingQueriesView(APIView):
                 "priority": r.priority,
                 "urgency_reason": r.urgency_reason,
                 "status": r.status,
+                "confidence": r.confidence,
                 "timestamp": r.created_at,
             }
             for r in rows
@@ -1470,6 +1471,7 @@ def serialize_pending_query(query: "PendingQuery") -> Dict[str, Any]:
         "group": query.group.slug if query.group_id else None,
         "routed_to_name": query.routed_to_name,
         "routed_to_email": query.routed_to_email,
+        "confidence": query.confidence,
         "answer": query.answer,
         "answered_by": query.answered_by,
         "answered_at": query.answered_at,

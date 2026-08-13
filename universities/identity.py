@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import random
-import re
 from typing import Optional
 
 from agents.agent_identity import DEFAULT_NAME_POOL
@@ -13,25 +12,18 @@ def _normalized(name: str) -> str:
 
 
 def make_university_id(institution_name: str) -> str:
-    """Slugify to [a-z0-9_]+ (same charset as django_api.services.make_student_id)
-    and resolve collisions with a numbered suffix, since this becomes a
-    permanent primary key and must be guaranteed unique up front."""
+    """Slugify to [a-z0-9_]+ (same charset as django_api.services.make_student_id
+    and institutes.identity.make_institute_id) and resolve collisions with a
+    numbered suffix, since this becomes a permanent primary key and must be
+    guaranteed unique up front. See korgut_backend.slugs.unique_slug."""
+    from korgut_backend.slugs import unique_slug
     from universities.models import University
 
-    cleaned = str(institution_name or "university").strip().lower()
-    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned)
-    cleaned = cleaned.strip("_") or "university"
-    cleaned = cleaned[:255]
-
-    if not University.objects.filter(pk=cleaned).exists():
-        return cleaned
-
-    suffix = 2
-    while True:
-        candidate = f"{cleaned}_{suffix}"[:255]
-        if not University.objects.filter(pk=candidate).exists():
-            return candidate
-        suffix += 1
+    return unique_slug(
+        institution_name,
+        exists=lambda candidate: University.objects.filter(pk=candidate).exists(),
+        default="university",
+    )
 
 
 def is_agent_name_available(name: str, exclude_university_id: Optional[str] = None) -> bool:

@@ -185,6 +185,13 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "auth": "60/min",
         "password_reset": "10/min",
+        # claim/start and claim/verify are public by design (the OTP is
+        # the auth), so both get an independent per-IP and per-email budget.
+        # verify has no outbound email, so it can afford a looser IP rate.
+        "claim_start_ip": "10/min",
+        "claim_start_email": "3/min",
+        "claim_verify_ip": "20/min",
+        "claim_verify_email": "10/min",
     },
 }
 

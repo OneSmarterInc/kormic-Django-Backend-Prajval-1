@@ -14,7 +14,7 @@ from django.core.mail import send_mail
 from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 
@@ -22,6 +22,12 @@ from accounts.models import Account
 from institutes.models import Institute
 
 from .models import ListedStudent, UniversityStudentList
+from .throttling import (
+    ClaimStartEmailThrottle,
+    ClaimStartIPThrottle,
+    ClaimVerifyEmailThrottle,
+    ClaimVerifyIPThrottle,
+)
 
 OTP_TTL_SECONDS = 10 * 60
 OTP_MAX_ATTEMPTS = 5
@@ -360,12 +366,17 @@ def send_invites(request, list_id):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([ClaimStartIPThrottle, ClaimStartEmailThrottle])
 def start_claim(request):
     """
     POST /api/claim/start/   {"email": ...} or {"token": ...}
     Sends a one-time code to the LISTED address and returns only the masked
     email. Reveals nothing else -- a forwarded link or photographed QR gets
     an attacker no further than this masked string.
+
+    Rate limited per-IP and per-email/token so it can't be hammered --
+    each call sends a real email, so the email-side budget is deliberately
+    tight (see ClaimStartEmailThrottle / DEFAULT_THROTTLE_RATES).
     """
     row = _find_claimable(
         email=str(request.data.get("email") or ""),
@@ -400,12 +411,14 @@ def start_claim(request):
 
 @api_view(["POST"])
 @permission_classes([AllowAny])
+@throttle_classes([ClaimVerifyIPThrottle, ClaimVerifyEmailThrottle])
 def verify_claim(request):
     """
     POST /api/claim/verify/   {"email"|"token": ..., "code": ...}
     Correct code -> the pre-fill payload plus a short-lived signed claim
     session for the confirm step. Wrong code -> attempts counted, nothing
     revealed.
+
     """
     row = _find_claimable(
         email=str(request.data.get("email") or ""),

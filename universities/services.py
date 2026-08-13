@@ -150,6 +150,29 @@ def scrape_now(university: University) -> Dict[str, Any]:
     }
 
 
+def scrape_selected_urls(university: University, urls: List[str], group_id: Optional[int] = None) -> Dict[str, Any]:
+    """Same one-URL-at-a-time loop as scrape_now(), but for an explicit URL
+    subset instead of every saved scrape_url, and threading group_id (B2) so
+    facts scraped from an approved url_discovery cluster get tagged with the
+    department they were approved for."""
+    from knowledge.scraper import scrape_university
+
+    kb = _kb_for(university.id)
+
+    results: List[Dict[str, Any]] = []
+    for url in urls:
+        try:
+            count = scrape_university(university.id, [url], university.name, kb, group_id=group_id)
+            results.append({"url": url, "status": "ok", "facts_stored": count})
+        except Exception as exc:
+            results.append({"url": url, "status": "failed", "facts_stored": 0, "error": str(exc)})
+
+    return {
+        "total_facts_stored": sum(r["facts_stored"] for r in results),
+        "results": results,
+    }
+
+
 def add_manual_knowledge_fact(
     university_id: str,
     topic: str,

@@ -395,6 +395,64 @@ class AutoDiscoverApplyAPIView(APIView):
         return Response({"scrape_urls": merged})
 
 
+class AutoDiscoverClusterMapAPIView(APIView):
+    """
+    GET /api/university-admin/scrape-urls/auto-discover/<job_id>/clusters/
+    B2: the proposed URL/department map for review -- this job's candidate
+    pages grouped by classifier category, each showing which KnowledgeGroup
+    it would feed and whether that cluster has already been approved.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        return Response({
+            "job": discovery_services.serialize_job(job),
+            "clusters": discovery_services.proposed_department_map(job),
+        })
+
+
+class AutoDiscoverClusterApproveAPIView(APIView):
+    """
+    POST /api/university-admin/scrape-urls/auto-discover/<job_id>/clusters/<category>/approve/
+    B2: approves one category cluster -- applies its URLs to
+    University.scrape_urls, scrapes them, tags the resulting facts with the
+    mapped KnowledgeGroup, and records who/when as provenance. Re-approving
+    the same cluster refreshes that provenance rather than duplicating it.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def post(self, request, job_id: int, category: str):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.discovery_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Discovery job not found.", status.HTTP_404_NOT_FOUND)
+
+        from url_discovery import services as discovery_services
+
+        approved_by = request.user.email or request.user.get_username()
+
+        try:
+            result = discovery_services.approve_cluster(job, category, approved_by=approved_by)
+        except ValueError as exc:
+            return _error(str(exc), status.HTTP_404_NOT_FOUND)
+        return Response(result)
+
+
 class ScrapeUrlsAPIView(APIView):
     """
     GET /api/university-admin/scrape-urls/

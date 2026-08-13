@@ -350,6 +350,7 @@ university or program; you already know it.
             "group": query.group.slug if query.group_id else None,
             "routed_to_name": query.routed_to_name,
             "routed_to_email": query.routed_to_email,
+            "confidence": query.confidence,
             "answer": query.answer,
             "answered_by": query.answered_by,
             "answered_at": query.answered_at.isoformat() if query.answered_at else None,
@@ -482,6 +483,7 @@ STUDENT CONTEXT:
         question: str,
         student_context: Optional[dict] = None,
         failure_reason: str = "Agent could not answer confidently from verified knowledge base.",
+        confidence: Optional[float] = None,
     ) -> Dict[str, Any]:
         existing_query = self._find_existing_active_query(question)
 
@@ -555,6 +557,7 @@ STUDENT CONTEXT:
             group=group,
             routed_to_name=routed_to_name,
             routed_to_email=routed_to_email,
+            confidence=confidence,
         )
 
         return self._serialize_pending_query(query)
@@ -832,6 +835,7 @@ STUDENT:
                 question=question,
                 student_context=student_context,
                 failure_reason=failure_reason,
+                confidence=confidence,
             )
 
             return {
@@ -890,6 +894,7 @@ STUDENT:
                     failure_reason=(
                         "No knowledge base coverage for: " + ", ".join(unsupported_topics)
                     ),
+                    confidence=confidence,
                 )
                 result["partial_pending"] = True
                 result["pending_query"] = pending_query

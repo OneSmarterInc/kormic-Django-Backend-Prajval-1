@@ -8,7 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from django.utils import timezone
 
 from url_discovery.domain_policy import validate_public_base_url
-from url_discovery.models import DiscoveredUrl, DiscoveryJob
+from url_discovery.models import DiscoveredUrl, DiscoveryClusterApproval, DiscoveryJob
 from url_discovery.url_normalizer import normalize_url
 
 logger = logging.getLogger(__name__)
@@ -235,4 +235,111 @@ def serialize_discovered_url(record: DiscoveredUrl, already_saved: set) -> Dict[
         "relevance_score": record.relevance_score,
         "decision_status": record.decision_status,
         "already_saved": url in already_saved,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cluster approval loop (B2) -- the human review step between "crawler found
+# these" and "these facts are in the knowledge base under a department".
+# ---------------------------------------------------------------------------
+
+CLUSTER_STATUSES = ["relevant", "review"]
+
+
+def serialize_cluster_approval(approval: DiscoveryClusterApproval) -> Dict[str, Any]:
+    return {
+        "category": approval.category,
+        "knowledge_group": approval.knowledge_group.slug if approval.knowledge_group_id else None,
+        "url_count": approval.url_count,
+        "urls": approval.urls,
+        "approved_by": approval.approved_by,
+        "approved_at": approval.approved_at,
+    }
+
+
+def proposed_department_map(job: DiscoveryJob) -> List[Dict[str, Any]]:
+    """The 'proposed URL/department map' an officer reviews: this job's
+    candidate pages grouped by classifier category, each tagged with the
+    KnowledgeGroup it would feed once approved, and the approval record if
+    that cluster has already been approved."""
+    from url_discovery.classifier import category_config
+    from url_discovery.group_mapping import group_slug_for_category
+
+    university = job.university
+    already_saved = set(university.scrape_urls or [])
+    labels = category_config()
+
+    approvals = {
+        approval.category: approval
+        for approval in DiscoveryClusterApproval.objects.filter(job=job)
+    }
+
+    records = list(job.urls.filter(decision_status__in=CLUSTER_STATUSES).order_by("-relevance_score"))
+    by_category: Dict[str, List[DiscoveredUrl]] = {}
+    for record in records:
+        category = record.primary_category or "uncategorized"
+        by_category.setdefault(category, []).append(record)
+
+    clusters = []
+    for category, category_records in sorted(by_category.items()):
+        approval = approvals.get(category)
+        clusters.append({
+            "category": category,
+            "label": labels.get(category, {}).get("label", category.replace("_", " ").title()),
+            "knowledge_group_slug": group_slug_for_category(category) if category != "uncategorized" else None,
+            "url_count": len(category_records),
+            "urls": [serialize_discovered_url(r, already_saved) for r in category_records],
+            "approved": serialize_cluster_approval(approval) if approval else None,
+        })
+
+    return clusters
+
+
+def approve_cluster(job: DiscoveryJob, category: str, approved_by: str) -> Dict[str, Any]:
+    """Approve one category cluster: apply its URLs to
+    University.scrape_urls, scrape just those URLs tagging the resulting
+    facts with the mapped KnowledgeGroup, and record who/when as
+    provenance. Re-approving the same cluster updates the existing row
+    (fresh provenance, not a duplicate)."""
+    from universities.knowledge_groups import ensure_default_groups
+    from universities.models import KnowledgeGroup
+    from universities.services import scrape_selected_urls
+    from url_discovery.group_mapping import group_slug_for_category
+
+    records = list(
+        job.urls.filter(decision_status__in=CLUSTER_STATUSES, primary_category=category)
+    )
+    if not records:
+        raise ValueError(f"No candidate URLs found for category '{category}' on this job.")
+
+    university = job.university
+    urls = [record.final_url or record.normalized_url for record in records]
+    urls = list(dict.fromkeys(u for u in urls if u))
+
+    ensure_default_groups(university)
+    group_slug = group_slug_for_category(category)
+    knowledge_group = KnowledgeGroup.objects.filter(university=university, slug=group_slug).first()
+
+    apply_selected_urls(university, job, urls, replace=False)
+
+    approved_at = timezone.now()
+    approval, _created = DiscoveryClusterApproval.objects.update_or_create(
+        job=job,
+        category=category,
+        defaults={
+            "knowledge_group": knowledge_group,
+            "url_count": len(urls),
+            "urls": urls,
+            "approved_by": approved_by,
+            "approved_at": approved_at,
+        },
+    )
+
+    scrape_result = scrape_selected_urls(
+        university, urls, group_id=knowledge_group.id if knowledge_group else None
+    )
+
+    return {
+        "approval": serialize_cluster_approval(approval),
+        "scrape_result": scrape_result,
     }

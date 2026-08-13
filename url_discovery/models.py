@@ -106,3 +106,38 @@ class DiscoveredUrl(models.Model):
 
     def __str__(self) -> str:
         return f"DiscoveredUrl({self.normalized_url})"
+
+
+class DiscoveryClusterApproval(models.Model):
+    """Provenance for the human review step: one row per approved
+    (job, category) cluster -- who approved it and when, plus a snapshot of
+    the URLs that were applied at that moment. `category` is the
+    DiscoveredUrl.primary_category value the cluster was grouped by;
+    `knowledge_group` is the resolved mapping (url_discovery.group_mapping)
+    the cluster's scraped facts were tagged with."""
+
+    job = models.ForeignKey(DiscoveryJob, on_delete=models.CASCADE, related_name="cluster_approvals")
+    category = models.CharField(max_length=255)
+    knowledge_group = models.ForeignKey(
+        "universities.KnowledgeGroup",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="discovery_cluster_approvals",
+    )
+    url_count = models.IntegerField(default=0)
+    urls = models.JSONField(default=list, blank=True)
+    approved_by = models.CharField(max_length=255, blank=True, default="")
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-approved_at"]
+        constraints = [
+            models.UniqueConstraint(fields=["job", "category"], name="uq_discovery_cluster_job_category"),
+        ]
+
+    def __str__(self) -> str:
+        return f"DiscoveryClusterApproval(job={self.job_id}, category={self.category})"

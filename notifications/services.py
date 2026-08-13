@@ -110,7 +110,7 @@ def notify_pending_query_resolved(
     answer: str,
     query_id: int,
 ) -> Optional[NotificationLog]:
-    content = f"Your question has been answered: {answer}"
+    content = f'Your question (Q{query_id}: "{question}") has been answered: {answer}'
     return send_agent_message(
         student_id=student_id,
         content=content,

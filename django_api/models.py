@@ -376,6 +376,8 @@ class PendingQuery(models.Model):
     answer = models.TextField(blank=True, default="")
     answered_by = models.CharField(max_length=255, blank=True, default="")
     answered_at = models.DateTimeField(null=True, blank=True)
+    
+    confidence = models.FloatField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

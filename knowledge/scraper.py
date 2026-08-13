@@ -363,7 +363,7 @@ PAGE CONTENT:
         return _fallback_extract_facts(url, page_text, university_name)
 
 
-def _store_fact(kb, fact: Dict[str, Any], url: str) -> bool:
+def _store_fact(kb, fact: Dict[str, Any], url: str, group_id: Optional[int] = None) -> bool:
     """
     Store a fact in the knowledge base.
 
@@ -390,6 +390,7 @@ def _store_fact(kb, fact: Dict[str, Any], url: str) -> bool:
             source_type="scraped",
             source_url=url,
             confidence=confidence,
+            group_id=group_id,
         )
         return True
     except TypeError:
@@ -398,6 +399,7 @@ def _store_fact(kb, fact: Dict[str, Any], url: str) -> bool:
             content=content,
             source_type="scraped",
             confidence=confidence,
+            group_id=group_id,
         )
         return True
 
@@ -407,9 +409,14 @@ def scrape_university(
     urls: List[str],
     university_name: str,
     kb,
+    group_id: Optional[int] = None,
 ) -> int:
     """
     Scrape all target URLs for a university and store facts in its knowledge base.
+
+    group_id tags every fact stored from this call with a KnowledgeGroup,
+    e.g. when scraping a url_discovery cluster that was just approved for a
+    specific department.
 
     Returns the total number of facts stored.
     """
@@ -453,7 +460,7 @@ def scrape_university(
             fact["content"] = content
 
             try:
-                if _store_fact(kb, fact, url):
+                if _store_fact(kb, fact, url, group_id=group_id):
                     total_facts += 1
             except Exception as exc:
                 console.print(f"[yellow]Could not store scraped fact from {url}: {exc}[/yellow]")

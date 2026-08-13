@@ -6,9 +6,12 @@ divergences; re-uploads never overwrite claimed rows.
 """
 import io
 import re
+from copy import deepcopy
 
+from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
 from django.core import mail
+from django.core.cache import cache
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
@@ -35,6 +38,10 @@ def _code_from_outbox() -> str:
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
 class ClaimFlowTests(TestCase):
     def setUp(self):
+        # B3's rate limits are keyed in the process-wide cache, which
+        # (unlike the DB) isn't rolled back between test methods -- clear it
+        # so one method's claim/start calls don't eat into another's budget.
+        cache.clear()
         self.client = APIClient()
         self.institute = register_institute("Wright State Feeder Institute", contact_email="ops@wsfi.edu")
         user = get_user_model().objects.create_user(
@@ -252,3 +259,87 @@ class ClaimFlowTests(TestCase):
         self.client.force_authenticate(user=user)
         resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
         self.assertEqual(resp.status_code, 500)
+
+
+def _throttled_rest_framework() -> dict:
+    """A copy of settings.REST_FRAMEWORK with tiny claim throttle rates so
+    a test can exhaust a budget in a handful of calls instead of needing
+    real load. ip/email rates are deliberately different sizes so a test can
+    isolate which one tripped."""
+    rates = deepcopy(django_settings.REST_FRAMEWORK)
+    rates["DEFAULT_THROTTLE_RATES"] = {
+        **rates["DEFAULT_THROTTLE_RATES"],
+        "claim_start_ip": "4/min",
+        "claim_start_email": "2/min",
+        "claim_verify_ip": "4/min",
+        "claim_verify_email": "2/min",
+    }
+    return rates
+
+
+@override_settings(
+    EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend",
+    REST_FRAMEWORK=_throttled_rest_framework(),
+)
+class ClaimRateLimitTests(TestCase):
+    """
+    B3: claim/start and claim/verify are public by design (the OTP is the
+    auth), so both need independent per-email and per-IP throttles so
+    neither can be hammered.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.institute = register_institute("Rate Limit Institute", contact_email="ops@rli.edu")
+        user = get_user_model().objects.create_user(
+            username="officer@rli.edu", email="officer@rli.edu", password="x"
+        )
+        Account.objects.create(user=user, role=Account.Role.INSTITUTE, institute_id=self.institute.id)
+        self.client.force_authenticate(user=user)
+        self.client.post(
+            "/api/institute-lists/upload/",
+            {
+                "file": io.BytesIO(CSV.encode()),
+                "institute_id": self.institute.id,
+                "contact_name": "Dr. John",
+                "contact_email": "john@rli.edu",
+                "contact_verification": "institutional email domain",
+            },
+            format="multipart",
+        )
+        self.client.force_authenticate(user=None)
+
+    def tearDown(self):
+        cache.clear()
+
+    def test_start_throttles_the_same_email_before_the_shared_ip_budget(self):
+        for _ in range(2):
+            resp = self.client.post("/api/claim/start/", {"email": "priya.sharma@gmail.com"}, format="json")
+            self.assertEqual(resp.status_code, 200)
+
+        resp = self.client.post("/api/claim/start/", {"email": "priya.sharma@gmail.com"}, format="json")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_start_throttles_per_ip_across_different_emails(self):
+        for email in ("priya.sharma@gmail.com", "arjun.rao@gmail.com", "unknown1@gmail.com", "unknown2@gmail.com"):
+            resp = self.client.post("/api/claim/start/", {"email": email}, format="json")
+            self.assertNotEqual(resp.status_code, 429)
+
+        # a 5th distinct email from the same source exhausts the shared per-IP budget
+        resp = self.client.post("/api/claim/start/", {"email": "unknown3@gmail.com"}, format="json")
+        self.assertEqual(resp.status_code, 429)
+
+    def test_verify_throttles_the_same_email_before_the_shared_ip_budget(self):
+        self.client.post("/api/claim/start/", {"email": "priya.sharma@gmail.com"}, format="json")
+
+        for _ in range(2):
+            resp = self.client.post(
+                "/api/claim/verify/", {"email": "priya.sharma@gmail.com", "code": "000000"}, format="json"
+            )
+            self.assertEqual(resp.status_code, 400)
+
+        resp = self.client.post(
+            "/api/claim/verify/", {"email": "priya.sharma@gmail.com", "code": "000000"}, format="json"
+        )
+        self.assertEqual(resp.status_code, 429)

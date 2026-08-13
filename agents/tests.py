@@ -80,6 +80,59 @@ class UniversityAgentPartialEscalationTests(TestCase):
         self.assertEqual(PendingQuery.objects.count(), 0)
 
 
+class PendingQueryConfidenceTests(TestCase):
+    """
+    once a question escalates, the confidence score that caused the
+    escalation must survive onto the PendingQuery contract instead of being
+    dropped -- otherwise a reviewer can't tell a near-miss (0.55) from a
+    wild guess (0.1).
+    """
+
+    def setUp(self):
+        University.objects.create(id="hard_state", name="Hard State", agent_name="Nova3")
+        self.agent = UniversityAgent("hard_state", auto_scrape=False)
+
+    @mock.patch("agents.university_agent._get_anthropic_client")
+    def test_different_confidence_scores_persist_distinctly_on_the_escalation(self, mock_client):
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "I'm not sure.",
+            "confidence": 0.55,
+            "unsupported_topics": [],
+        })
+        low_result = self.agent.answer("What is the exact GRE cutoff?")
+
+        mock_client.return_value.messages.create.return_value = _fake_response({
+            "answer": "No idea.",
+            "confidence": 0.1,
+            "unsupported_topics": [],
+        })
+        very_low_result = self.agent.answer("Is there a secret scholarship for left-handed students?")
+
+        self.assertTrue(low_result["pending"])
+        self.assertTrue(very_low_result["pending"])
+        self.assertEqual(low_result["confidence"], 0.55)
+        self.assertEqual(very_low_result["confidence"], 0.1)
+
+        # The escalation record itself carries the real score, not a placeholder.
+        self.assertEqual(low_result["pending_query"]["confidence"], 0.55)
+        self.assertEqual(very_low_result["pending_query"]["confidence"], 0.1)
+        self.assertNotEqual(
+            low_result["pending_query"]["confidence"],
+            very_low_result["pending_query"]["confidence"],
+        )
+
+        # And it's what's actually stored, and what the officer-facing API contract exposes.
+        low_query = PendingQuery.objects.get(id=low_result["pending_query"]["query_id"])
+        very_low_query = PendingQuery.objects.get(id=very_low_result["pending_query"]["query_id"])
+        self.assertEqual(low_query.confidence, 0.55)
+        self.assertEqual(very_low_query.confidence, 0.1)
+
+        from django_api.views import serialize_pending_query
+
+        self.assertEqual(serialize_pending_query(low_query)["confidence"], 0.55)
+        self.assertEqual(serialize_pending_query(very_low_query)["confidence"], 0.1)
+
+
 class UniversityAgentOfficerGuardrailTests(TestCase):
     """
     An officer chatting directly with their own agent (previewing/testing
