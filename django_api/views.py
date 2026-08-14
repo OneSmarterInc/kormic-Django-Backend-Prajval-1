@@ -1362,11 +1362,16 @@ class AnswerPendingQueryView(APIView):
                 try:
                     from notifications.services import notify_pending_query_resolved
 
+                    student_facing_answer = agent.format_answer_for_student(
+                        question=selected_query.question,
+                        answer=answer,
+                    )
+
                     notify_pending_query_resolved(
                         student_id=selected_query.student_id,
                         university_id=university_id,
                         question=selected_query.question,
-                        answer=answer,
+                        answer=student_facing_answer,
                         query_id=query_id_int,
                     )
                 except Exception:

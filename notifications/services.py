@@ -110,7 +110,9 @@ def notify_pending_query_resolved(
     answer: str,
     query_id: int,
 ) -> Optional[NotificationLog]:
-    content = f'Your question (Q{query_id}: "{question}") has been answered: {answer}'
+    question = (question or "").strip()
+    answer = (answer or "").strip()
+    content = f'Q{query_id}: "{question}"\n\n{answer}'
     return send_agent_message(
         student_id=student_id,
         content=content,
@@ -120,6 +122,7 @@ def notify_pending_query_resolved(
             "type": "pending_query_resolved",
             "query_id": query_id,
             "question": question,
+            "answer": answer,
             "university_id": university_id,
         },
         notification_data={"type": "pending_query_resolved", "query_id": query_id},

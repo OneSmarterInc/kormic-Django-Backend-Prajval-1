@@ -381,6 +381,7 @@ class PendingQueryResolutionNotificationTests(TestCase):
     def test_resolving_query_notifies_student_and_appends_chat_message(self, mock_get_agent, mock_delay):
         mock_agent = mock.Mock()
         mock_agent.resolve_pending_query.return_value = True
+        mock_agent.format_answer_for_student.return_value = "1) The deadline is March 1st."
         mock_get_agent.return_value = mock_agent
 
         resp = self.officer.post(

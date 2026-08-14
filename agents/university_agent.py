@@ -659,6 +659,51 @@ STUDENT CONTEXT:
         print(f"Pending Query #{query_id} resolved successfully and saved as human-verified knowledge.")
         return True
 
+    def format_answer_for_student(self, question: str, answer: str) -> str:
+        """
+        Reformat a university officer's raw resolved-query answer into clean,
+        readable text for the student-facing chat notification.
+
+        """
+        answer = (answer or "").strip()
+        if not answer:
+            return answer
+
+        prompt = f"""
+A university just answered a student's question. Reformat the answer so it
+reads cleanly in a chat message: short paragraphs, and simple numbered
+points like 1), 2), 3) when it lists multiple items, options, or steps.
+
+Do not add, remove, or change any fact, number, date, or amount. Do not add
+commentary, disclaimers, or a greeting. Only improve structure, clarity, and
+grammar.
+
+Do not use Markdown formatting (no **bold**, no ## headings, no markdown
+tables, no bullet dashes) -- this is displayed as plain text, so use
+numbered points like 1), 2), 3) instead.
+
+QUESTION:
+{question}
+
+RAW ANSWER FROM THE UNIVERSITY:
+{answer}
+
+Return ONLY the reformatted answer text. No JSON, no preamble.
+"""
+        try:
+            client = _get_anthropic_client()
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=600,
+                system="Return only the reformatted plain-text answer. No markdown, no preamble, no JSON.",
+                messages=[{"role": "user", "content": prompt}],
+            )
+            formatted = response.content[0].text.strip()
+            return formatted or answer
+        except Exception as exc:
+            console.print(f"[yellow]Answer formatting for student failed: {exc}[/yellow]")
+            return answer
+
     # --------------------------------------------------
     # Answering
     # --------------------------------------------------
