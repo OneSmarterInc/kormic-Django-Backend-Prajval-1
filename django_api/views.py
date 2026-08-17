@@ -1717,10 +1717,19 @@ def university_agent_chat(request, university_id: str):
         return api_error(f"University agent chat failed: {exc}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-@api_view(["GET"])
+@api_view(["GET", "DELETE"])
 @permission_classes(UNIVERSITY_OWNER_PERMISSIONS)
 def university_agent_chat_history(request, university_id: str):
-    """GET /api/university/<university_id>/chat/history/"""
+    """
+    GET /api/university/<university_id>/chat/history/
+    DELETE /api/university/<university_id>/chat/history/
+    """
+    if request.method == "DELETE":
+        deleted_count, _ = ChatMessage.objects.filter(
+            channel=ChatMessage.Channel.UNIVERSITY, university_id=university_id
+        ).delete()
+        return Response({"status": "ok", "university_id": university_id, "messages_deleted": deleted_count})
+
     messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.UNIVERSITY, university_id=university_id)
     return Response({
         "count": messages.count(),

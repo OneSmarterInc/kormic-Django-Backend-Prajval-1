@@ -511,6 +511,7 @@ class KnowledgeFactListCreateAPIView(APIView):
         Optional query params narrow the list:
           ?section=<source_type>   e.g. seed, manual, scraped, conversation, human_verified
           ?source_url=<url>        exact match against the scraped page a fact came from
+          ?group=<slug>            one of admissions|international|money|campus_life
     POST /api/university-admin/knowledge/  Body: {"topic": "...", "content": "...", "confidence": 1.0}
     POST always stores as source_type="manual" regardless of request body --
     the direct write path that used to only exist reactively via resolving
@@ -535,6 +536,10 @@ class KnowledgeFactListCreateAPIView(APIView):
         source_url = request.query_params.get("source_url")
         if source_url:
             entries = entries.filter(source_url=source_url.strip())
+
+        group_slug = request.query_params.get("group")
+        if group_slug:
+            entries = entries.filter(group__slug=group_slug.strip().lower())
 
         return Response({"knowledge": [_serialize_knowledge_entry(entry) for entry in entries]})
 
@@ -639,7 +644,9 @@ class KnowledgeSourceUrlsAPIView(APIView):
 class KnowledgeFactDetailAPIView(APIView):
     """
     PATCH /api/university-admin/knowledge/<int:fact_id>/
-        Body: any of {"topic": "...", "content": "...", "confidence": 1.0}
+        Body: any of {"topic": "...", "content": "...", "confidence": 1.0, "group": "money"}
+        "group" accepts a slug (admissions|international|money|campus_life)
+        or null/"" to clear it.
     DELETE /api/university-admin/knowledge/<int:fact_id>/
     Editing/deleting is allowed for any source_type (seed, manual, scraped,
     conversation, human_verified) -- an officer may need to correct or
@@ -695,8 +702,31 @@ class KnowledgeFactDetailAPIView(APIView):
             entry.confidence = max(0.0, min(1.0, confidence))
             update_fields.append("confidence")
 
+        if "group" in data:
+            raw_group = data["group"]
+            if raw_group in (None, ""):
+                entry.group = None
+                update_fields.append("group")
+            else:
+                group_slug = str(raw_group).strip().lower()
+                if group_slug not in KnowledgeGroup.Slug.values:
+                    return _error(f"group must be one of: {', '.join(KnowledgeGroup.Slug.values)}.")
+
+                university = University.objects.filter(pk=entry.university_id).first()
+                if university is not None:
+                    ensure_default_groups(university)
+
+                group = KnowledgeGroup.objects.filter(
+                    university_id=entry.university_id, slug=group_slug
+                ).first()
+                if group is None:
+                    return _error("Knowledge group not found.", status.HTTP_404_NOT_FOUND)
+
+                entry.group = group
+                update_fields.append("group")
+
         if not update_fields:
-            return _error("Provide at least one of topic, content, confidence to update.")
+            return _error("Provide at least one of topic, content, confidence, group to update.")
 
         entry.save(update_fields=update_fields)
         return Response(_serialize_knowledge_entry(entry))
@@ -771,3 +801,42 @@ class KnowledgeGroupDetailAPIView(APIView):
 
         counts = escalation_counts_by_group(university.id)
         return Response(_serialize_knowledge_group(group, counts))
+
+
+class KnowledgeGroupFactsAPIView(APIView):
+    """
+    GET /api/university-admin/knowledge-groups/<slug>/knowledge/
+    Knowledge facts tagged with one group -- backs a "view list" action per
+    group on the officer dashboard. Equivalent to
+    GET /knowledge/?group=<slug> but also returns the group's own record
+    (contact info, escalation_count) alongside its facts in one call.
+    Lazily creates the 4 default groups first, same as the group list GET,
+    so this works even if the frontend hasn't called that endpoint yet.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, slug: str):
+        from django_api.models import UniversityKnowledgeEntry
+
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        slug = slug.strip().lower()
+        if slug not in KnowledgeGroup.Slug.values:
+            return _error(
+                f"slug must be one of: {', '.join(KnowledgeGroup.Slug.values)}.",
+                status.HTTP_404_NOT_FOUND,
+            )
+
+        ensure_default_groups(university)
+        group = university.knowledge_groups.filter(slug=slug).first()
+
+        entries = UniversityKnowledgeEntry.objects.filter(university_id=university.id, group__slug=slug)
+        counts = escalation_counts_by_group(university.id)
+
+        return Response({
+            "group": _serialize_knowledge_group(group, counts),
+            "knowledge": [_serialize_knowledge_entry(entry) for entry in entries],
+        })

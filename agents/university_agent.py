@@ -755,12 +755,31 @@ Return ONLY the reformatted answer text. No JSON, no preamble.
 
         # 2. Search regular knowledge base.
         kb_context, results = self._build_relevant_kb_context(question)
+
+        if not results and caller_role == "officer" and self.kb.entries:
+            kb_context = self.kb.get_full_context()
+            results = self.kb.entries
+
         student_ctx = self._build_student_context(student_context)
+
+        if caller_role == "officer":
+            questioner_instruction = (
+                "Answer your own university's admissions officer, who is asking "
+                "about their own university (not a student's application), "
+                "using ONLY the available knowledge base context."
+            )
+            caller_context_block = ""
+        else:
+            questioner_instruction = (
+                "Answer the student's question using ONLY the available "
+                "knowledge base context."
+            )
+            caller_context_block = f"\n\nSTUDENT:\n{student_ctx}"
 
         prompt = f"""
 You are a university graduate admissions program agent.
 
-Answer the student's question using ONLY the available knowledge base context.
+{questioner_instruction}
 If the answer is not clearly supported, say so and return low confidence.
 
 The question may bundle several distinct topics together (e.g. "what are the
@@ -804,9 +823,7 @@ RELEVANT KNOWLEDGE BASE CONTEXT:
 
 QUESTION:
 {question}
-
-STUDENT:
-{student_ctx}
+{caller_context_block}
 """
 
         try:
@@ -843,6 +860,10 @@ STUDENT:
             answer_text = "I could not generate an answer from the available university knowledge."
             confidence = 0.0
             unsupported_topics = []
+
+        if not results and confidence > 0:
+        
+            confidence = 0.0
 
         if not results:
             failure_reason = "No matching knowledge found in the knowledge base."

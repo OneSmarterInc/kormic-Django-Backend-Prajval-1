@@ -73,4 +73,9 @@ urlpatterns = [
         views.KnowledgeGroupDetailAPIView.as_view(),
         name="university-admin-knowledge-group-detail",
     ),
+    path(
+        "knowledge-groups/<str:slug>/knowledge/",
+        views.KnowledgeGroupFactsAPIView.as_view(),
+        name="university-admin-knowledge-group-facts",
+    ),
 ]
