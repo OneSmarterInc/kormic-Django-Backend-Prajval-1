@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.permissions import IsTOTPEnrolled, IsUniversityRole, get_account
-from universities import services
+from universities import notifications, services
 from universities.identity import is_agent_name_available
 from universities.knowledge_groups import ensure_default_groups, escalation_counts_by_group
 from universities.models import KnowledgeGroup, University
@@ -839,4 +839,124 @@ class KnowledgeGroupFactsAPIView(APIView):
         return Response({
             "group": _serialize_knowledge_group(group, counts),
             "knowledge": [_serialize_knowledge_entry(entry) for entry in entries],
+        })
+
+
+def _resolve_group_or_error(request, slug: str):
+    """Shared slug validation + lazy-group-creation for the two escalation
+    views below. Returns (university, group, error_response); university and
+    group are None iff error_response is set."""
+    university = _get_own_university(request)
+    if university is None:
+        return None, None, _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+    slug = slug.strip().lower()
+    if slug not in KnowledgeGroup.Slug.values:
+        return None, None, _error(
+            f"slug must be one of: {', '.join(KnowledgeGroup.Slug.values)}.",
+            status.HTTP_404_NOT_FOUND,
+        )
+
+    ensure_default_groups(university)
+    group = university.knowledge_groups.filter(slug=slug).first()
+    if group is None:
+        return None, None, _error("Knowledge group not found.", status.HTTP_404_NOT_FOUND)
+
+    return university, group, None
+
+
+class KnowledgeGroupEscalationsAPIView(APIView):
+    """
+    GET /api/university-admin/knowledge-groups/<slug>/escalations/
+    The actual list behind a group's "escalation_count" -- every escalated
+    student question (PendingQuery) routed to this group, newest first.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, slug: str):
+        from django_api.models import PendingQuery
+        from django_api.views import serialize_pending_query
+
+        university, group, error = _resolve_group_or_error(request, slug)
+        if error is not None:
+            return error
+
+        escalations = PendingQuery.objects.filter(
+            university_id=university.id, group__slug=group.slug
+        ).order_by("-created_at")
+
+        counts = escalation_counts_by_group(university.id)
+
+        return Response({
+            "group": _serialize_knowledge_group(group, counts),
+            "escalations": [serialize_pending_query(query) for query in escalations],
+        })
+
+
+class KnowledgeGroupEscalationNotifyAPIView(APIView):
+    """
+    POST /api/university-admin/knowledge-groups/<slug>/escalations/notify/
+        Body (optional): {"escalation_ids": [1, 2], "message": "..."}
+    Emails the group's escalation contact about escalations routed to it --
+    the "send mail to the routed group" action. Defaults to every
+    still-pending escalation for the group; pass escalation_ids to scope the
+    email to a specific selection instead (ids outside this group/university
+    are silently ignored, not errored, so a stale id in a batch doesn't fail
+    the whole send). "message" is an optional note prepended to the
+    auto-generated summary.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def post(self, request, slug: str):
+        from django_api.models import PendingQuery
+
+        university, group, error = _resolve_group_or_error(request, slug)
+        if error is not None:
+            return error
+
+        if not group.escalation_contact_email:
+            return _error(
+                "This group has no escalation contact email set. Set one first with "
+                "PATCH /api/university-admin/knowledge-groups/<slug>/."
+            )
+
+        data = request.data or {}
+        escalation_ids = data.get("escalation_ids")
+
+        escalations_qs = PendingQuery.objects.filter(university_id=university.id, group__slug=group.slug)
+        if escalation_ids not in (None, ""):
+            if not isinstance(escalation_ids, list) or not all(isinstance(i, int) for i in escalation_ids):
+                return _error("escalation_ids must be a list of integer ids.")
+            escalations_qs = escalations_qs.filter(id__in=escalation_ids)
+        else:
+            escalations_qs = escalations_qs.filter(status=PendingQuery.Status.PENDING)
+
+        escalations = list(escalations_qs.order_by("-created_at"))
+        if not escalations:
+            return _error("No matching escalations to notify about.", status.HTTP_404_NOT_FOUND)
+
+        custom_message = str(data.get("message", "")).strip()
+
+        sent = notifications.send_escalation_digest_email(
+            to_email=group.escalation_contact_email,
+            to_name=group.escalation_contact_name,
+            group_label=group.get_slug_display(),
+            university_name=university.name,
+            escalations=escalations,
+            custom_message=custom_message,
+        )
+
+        if not sent:
+            return _error(
+                "Failed to send the notification email. Please try again shortly.",
+                status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({
+            "status": "sent",
+            "to": group.escalation_contact_email,
+            "escalation_count": len(escalations),
+            "escalation_ids": [query.id for query in escalations],
         })

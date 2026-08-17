@@ -59,6 +59,45 @@ def _kb_for(university_id: str):
     return UniversityKnowledgeBase(university_id)
 
 
+def _already_scraped_urls(university_id: str) -> set[str]:
+    """Normalized source_url values already represented in this
+    university's knowledge base. Used to skip re-scraping a page whose
+    content is already captured -- without this, clicking "scrape now" or
+    approving the same cluster twice re-fetches the page and asks Claude to
+    re-extract facts, which (worded slightly differently each time) slip
+    past the exact-match dedup in UniversityKnowledgeBase.store() and pile
+    up as near-duplicate facts in the same section."""
+    from url_discovery.url_normalizer import normalize_url
+
+    from django_api.models import UniversityKnowledgeEntry
+
+    raw_urls = (
+        UniversityKnowledgeEntry.objects.filter(university_id=university_id)
+        .exclude(source_url__isnull=True)
+        .exclude(source_url="")
+        .values_list("source_url", flat=True)
+    )
+
+    return {normalized for u in raw_urls if (normalized := normalize_url(u))}
+
+
+def _dedupe_urls(urls: List[str]) -> List[str]:
+    """Order-preserving de-dup of a URL list by normalized form, so a URL
+    saved twice (e.g. with/without a trailing slash) is only ever fetched
+    once per call."""
+    from url_discovery.url_normalizer import normalize_url
+
+    seen: set[str] = set()
+    deduped: List[str] = []
+    for url in urls:
+        normalized = normalize_url(url) or url
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+    return deduped
+
+
 def sync_profile_facts_to_kb(university: University) -> None:
     """Project description/contacts/eligibility_criteria into
     UniversityKnowledgeEntry rows (source_type="seed") so the agent can
@@ -124,23 +163,41 @@ def sync_profile_facts_to_kb(university: University) -> None:
         )
 
 
+_ALREADY_SCRAPED_REASON = (
+    "Skipped -- this URL's content is already captured in the knowledge base. "
+    "Edit or delete the existing fact(s) first if the page has changed and "
+    "needs to be re-scraped."
+)
+
+
 def scrape_now(university: University) -> Dict[str, Any]:
     """Synchronously scrape every saved URL, one at a time, so a failure on
     one page doesn't lose results from the others. knowledge.scraper's
     scrape_university() signature is untouched -- this just calls it once
     per URL and aggregates. It already sleeps ~1.5s per URL internally, so
     looping single-URL calls costs nothing extra in wall time versus one
-    batched call, and buys per-URL visibility."""
+    batched call, and buys per-URL visibility.
+
+    URLs already represented in the knowledge base (by normalized source_url)
+    are skipped rather than re-scraped, so repeated clicks don't keep adding
+    near-duplicate facts extracted from the same page with slightly
+    different wording each time."""
     from knowledge.scraper import scrape_university
 
-    urls = list(university.scrape_urls or [])
+    urls = _dedupe_urls(list(university.scrape_urls or []))
     kb = _kb_for(university.id)
+    already_scraped = _already_scraped_urls(university.id)
 
     results: List[Dict[str, Any]] = []
     for url in urls:
+        if url in already_scraped:
+            results.append({"url": url, "status": "skipped", "facts_stored": 0, "reason": _ALREADY_SCRAPED_REASON})
+            continue
         try:
             count = scrape_university(university.id, [url], university.name, kb)
             results.append({"url": url, "status": "ok", "facts_stored": count})
+            if count:
+                already_scraped.add(url)
         except Exception as exc:
             results.append({"url": url, "status": "failed", "facts_stored": 0, "error": str(exc)})
 
@@ -154,16 +211,27 @@ def scrape_selected_urls(university: University, urls: List[str], group_id: Opti
     """Same one-URL-at-a-time loop as scrape_now(), but for an explicit URL
     subset instead of every saved scrape_url, and threading group_id (B2) so
     facts scraped from an approved url_discovery cluster get tagged with the
-    department they were approved for."""
+    department they were approved for.
+
+    Same already-scraped skip as scrape_now() -- this is also the path
+    approve_cluster() calls, so re-approving a cluster (or a cluster whose
+    URLs overlap one already scraped) doesn't re-ingest the same content."""
     from knowledge.scraper import scrape_university
 
+    urls = _dedupe_urls(list(urls))
     kb = _kb_for(university.id)
+    already_scraped = _already_scraped_urls(university.id)
 
     results: List[Dict[str, Any]] = []
     for url in urls:
+        if url in already_scraped:
+            results.append({"url": url, "status": "skipped", "facts_stored": 0, "reason": _ALREADY_SCRAPED_REASON})
+            continue
         try:
             count = scrape_university(university.id, [url], university.name, kb, group_id=group_id)
             results.append({"url": url, "status": "ok", "facts_stored": count})
+            if count:
+                already_scraped.add(url)
         except Exception as exc:
             results.append({"url": url, "status": "failed", "facts_stored": 0, "error": str(exc)})
 
