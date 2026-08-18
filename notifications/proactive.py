@@ -69,13 +69,20 @@ def build_checkin_message(profile: Dict[str, Any]) -> Optional[str]:
 
 
 def run_checkin_for_student(
-    student_id: str, *, cooldown_days: int = DEFAULT_COOLDOWN_DAYS
+    student_id: str,
+    *,
+    cooldown_days: int = DEFAULT_COOLDOWN_DAYS,
+    queue_push: bool = True,
 ) -> Optional[NotificationLog]:
     """
     Build and send one proactive nudge for this student, unless they were
     already nudged within the cooldown window or there's nothing to say.
     Safe to call repeatedly (e.g. once per scheduled scan) -- the cooldown
     check makes it idempotent within the window.
+
+    queue_push=False leaves the push dispatch to the caller -- used when
+    fanning out a scan across many students so their pushes can be sent as
+    one batched Expo call (see notifications.tasks).
     """
     from accounts.models import Account
     from django_api.services import load_profile_data, make_student_id
@@ -100,4 +107,5 @@ def run_checkin_for_student(
         title="Quick suggestion from your agent",
         meta={"type": "proactive_checkin"},
         notification_data={"type": "proactive_checkin"},
+        queue_push=queue_push,
     )

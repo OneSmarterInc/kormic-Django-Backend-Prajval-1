@@ -30,6 +30,7 @@ def _queue_push(
     title: str,
     body: str,
     data: Optional[Dict[str, Any]] = None,
+    queue_push: bool = True,
 ) -> NotificationLog:
     log = NotificationLog.objects.create(
         account=account,
@@ -38,7 +39,8 @@ def _queue_push(
         body=body,
         data=data or {},
     )
-    send_push_notification_task.delay(log.id)
+    if queue_push:
+        send_push_notification_task.delay(log.id)
     return log
 
 
@@ -70,6 +72,7 @@ def send_agent_message(
     title: str = "New message from your agent",
     meta: Optional[Dict[str, Any]] = None,
     notification_data: Optional[Dict[str, Any]] = None,
+    queue_push: bool = True,
 ) -> Optional[NotificationLog]:
     """
     General-purpose hook for any message the agent (or an operator/automation
@@ -78,6 +81,11 @@ def send_agent_message(
     broadcast, etc. Writes the message into the student's agent chat thread
     *and* queues the push, so it "just shows up" in chat whether or not the
     student sees the notification.
+
+    queue_push=False skips the individual Celery dispatch and leaves the
+    NotificationLog as PENDING -- used by callers that batch many students'
+    pushes into one Expo call themselves (see
+    notifications.tasks.run_proactive_checkin_batch_task).
     """
     account = Account.objects.filter(student_id=student_id).first()
     if account is None:
@@ -99,6 +107,7 @@ def send_agent_message(
         title=title,
         body=_truncate(content),
         data=notification_data or {"type": event_type},
+        queue_push=queue_push,
     )
 
 

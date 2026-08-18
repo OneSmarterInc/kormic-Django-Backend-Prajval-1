@@ -34,9 +34,20 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or \
     'django-insecure-0zav109$orgckjm3w+%%8v!lxt&4)qv68d^w*f%@fid@_y!c83'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.environ.get("DJANGO_DEBUG", "true").lower() == "true"
+# Defaults to False (fail closed): an unset/misconfigured DJANGO_DEBUG in a
+# deploy environment must never silently open a debug server to the
+# internet. Local dev sets DJANGO_DEBUG=true explicitly in .env.
+DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 
-ALLOWED_HOSTS = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "*").split(",")]
+# Defaults to localhost only (fail closed) so a missing env var on a real
+# server rejects Host headers instead of accepting anything ("*"). Any
+# server reachable off localhost (staging, prod) must set
+# DJANGO_ALLOWED_HOSTS explicitly -- see deployment_checklist_to_do.md.
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    if h.strip()
+]
 
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
@@ -69,6 +80,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -108,6 +120,9 @@ DATABASES = {
         'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'kormic'),
         'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
         'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+      
+        'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '60')),
+        'CONN_HEALTH_CHECKS': True,
     }
 }
 
@@ -147,6 +162,20 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
+# Served by whitenoise (see MIDDLEWARE) directly from the app process --
+# no separate nginx/CDN needed for the admin site's CSS/JS to work in
+# production. `manage.py collectstatic` runs on every container start (see
+# docker-compose.yml's `web` command), so this is a no-op if nothing changed.
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -157,10 +186,20 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "uploads"
 
 # Korgut Django REST API settings
-CORS_ALLOW_ALL_ORIGINS = True
-
-MEDIA_URL = "/media/"
-MEDIA_ROOT = BASE_DIR / "uploads"
+# CORS_ALLOW_ALL_ORIGINS is only ever safe for local development. Production
+# (DEBUG=False) must supply an explicit comma-separated allow-list of
+# frontend origins via DJANGO_CORS_ALLOWED_ORIGINS -- see
+# deployment_checklist_to_do.md. Unset in production fails closed (no
+# origins allowed) rather than silently staying wide open.
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [
+        o.strip()
+        for o in os.environ.get("DJANGO_CORS_ALLOWED_ORIGINS", "").split(",")
+        if o.strip()
+    ]
 
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
@@ -205,10 +244,22 @@ SIMPLE_JWT = {
     "USER_ID_CLAIM": "user_id",
 }
 
-# Explicit for clarity — this is already Django's implicit default.
+# Redis-backed, shared across every gunicorn worker process (unlike
+# LocMemCache, which is per-process and in-memory). This is load-bearing,
+# not just a performance nicety: DRF's ScopedRateThrottle rate limits (auth,
+# password_reset, claim_start/verify -- see DEFAULT_THROTTLE_RATES above)
+# and the TOTP replay/lockout cache (accounts/totp.py) both assume one
+# shared counter. With LocMemCache and >1 worker, each worker tracks its own
+# count, so the real effective rate limit becomes configured_rate ×
+# worker_count -- silently weaker than configured. Uses a separate Redis DB
+# index from the Celery broker/result-backend (0/1) to keep keyspaces apart.
 CACHES = {
     "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "BACKEND": "django_redis.cache.RedisCache",
+        "LOCATION": os.environ.get("DJANGO_CACHE_URL", "redis://localhost:6379/2"),
+        "OPTIONS": {
+            "CLIENT_CLASS": "django_redis.client.DefaultClient",
+        },
     }
 }
 
@@ -226,7 +277,16 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = TIME_ZONE
+# Global defaults, sized for quick tasks (push notifications). Anything that
+# legitimately runs longer (url_discovery's crawl, notifications' proactive
+# check-in batches) sets its own explicit soft_time_limit/time_limit on the
+# @shared_task decorator -- see url_discovery/tasks.py and
+# notifications/tasks.py. SOFT_TIME_LIMIT raises a catchable
+# SoftTimeLimitExceeded 5s before the hard SIGKILL, so any future task that
+# forgets to override still gets one chance to log/clean up instead of
+# vanishing silently mid-loop.
 CELERY_TASK_TIME_LIMIT = 30
+CELERY_TASK_SOFT_TIME_LIMIT = 25
 CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").lower() == "true"
 
 # Proactive agent outreach (notifications.tasks.run_proactive_checkins_task):
@@ -236,6 +296,11 @@ CELERY_TASK_ALWAYS_EAGER = os.environ.get("CELERY_TASK_ALWAYS_EAGER", "false").l
 # process running alongside the worker -- see notifications/proactive.py.
 PROACTIVE_CHECKIN_HOUR = int(os.environ.get("PROACTIVE_CHECKIN_HOUR", "9"))
 PROACTIVE_CHECKIN_COOLDOWN_DAYS = int(os.environ.get("PROACTIVE_CHECKIN_COOLDOWN_DAYS", "7"))
+# Students per fanned-out Celery sub-task (see run_proactive_checkins_task in
+# notifications/tasks.py) -- keeps each sub-task's synchronous DB loop well
+# under its own time limit and lets pushes for the whole batch go out as ~1
+# Expo call instead of 1-per-student.
+PROACTIVE_CHECKIN_BATCH_SIZE = int(os.environ.get("PROACTIVE_CHECKIN_BATCH_SIZE", "50"))
 
 CELERY_BEAT_SCHEDULE = {
     "proactive-agent-checkins": {
@@ -279,3 +344,52 @@ else:
 # than emailing a broken link, same intentional-fail-loud pattern as the
 # EMAIL_BACKEND requirement above.
 CLAIM_PAGE_URL = os.getenv("CLAIM_PAGE_URL", "")
+
+
+# Logging -- without this, Django/Celery's default logging goes essentially
+# nowhere useful in production. Everything goes to stdout/stderr (the
+# standard practice for containers: `docker logs`, and whatever log driver
+# / CloudWatch agent the host has configured picks it up from there) rather
+# than a file path this app would have to manage permissions/rotation for.
+# DJANGO_LOG_LEVEL defaults to INFO so a bare production deploy gets useful
+# output immediately; tighten with an env var if it's too chatty.
+LOG_LEVEL = os.environ.get("DJANGO_LOG_LEVEL", "INFO").upper()
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "[{asctime}] {levelname} {name}: {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "verbose",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": LOG_LEVEL,
+    },
+    "loggers": {
+
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "django": {
+            "handlers": ["console"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+        "celery": {
+            "handlers": ["console"],
+            "level": LOG_LEVEL,
+            "propagate": False,
+        },
+    },
+}

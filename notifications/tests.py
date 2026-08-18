@@ -280,6 +280,51 @@ class SendPushNotificationTaskTests(TestCase):
         self.assertEqual(self.log.status, NotificationLog.Status.FAILED)
         self.assertIn("Expo is down", self.log.error)
 
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_already_sent_log_is_not_resent(self, mock_send):
+        """Idempotency guard: a redelivered/duplicate task instance must not
+        push the same notification twice."""
+        from notifications.tasks import send_push_notification_task
+
+        PushToken.objects.create(account=self.account, token="ExponentPushToken[already-sent]")
+        self.log.status = NotificationLog.Status.SENT
+        self.log.save(update_fields=["status"])
+
+        send_push_notification_task(self.log.id)
+
+        mock_send.assert_not_called()
+
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_skipped_no_token_log_is_not_resent(self, mock_send):
+        from notifications.tasks import send_push_notification_task
+
+        self.log.status = NotificationLog.Status.SKIPPED_NO_TOKEN
+        self.log.save(update_fields=["status"])
+
+        send_push_notification_task(self.log.id)
+
+        mock_send.assert_not_called()
+
+    @mock.patch("notifications.tasks.check_push_receipts_task.apply_async")
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_failed_log_is_retried(self, mock_send, mock_apply_async):
+        """A log left FAILED by a previous attempt (transient Expo error)
+        must still be retryable -- the idempotency guard only excludes
+        already-terminal SENT/SKIPPED_NO_TOKEN states."""
+        from notifications.tasks import send_push_notification_task
+
+        token = PushToken.objects.create(account=self.account, token="ExponentPushToken[retry]")
+        self.log.status = NotificationLog.Status.FAILED
+        self.log.error = "previous transient failure"
+        self.log.save(update_fields=["status", "error"])
+        mock_send.return_value = [{"status": "ok", "id": "receipt-retry"}]
+
+        send_push_notification_task(self.log.id)
+
+        self.log.refresh_from_db()
+        self.assertEqual(self.log.status, NotificationLog.Status.SENT)
+        mock_send.assert_called_once()
+
 
 class CheckPushReceiptsTaskTests(TestCase):
     def setUp(self):
@@ -610,6 +655,11 @@ class RunCheckinForStudentTests(TestCase):
 
 
 class ProactiveCheckinTaskTests(TestCase):
+    """run_proactive_checkins_task no longer does per-student work itself --
+    it only enumerates candidates and fans them out to
+    run_proactive_checkin_batch_task in chunks of
+    settings.PROACTIVE_CHECKIN_BATCH_SIZE (see notifications/tasks.py)."""
+
     def setUp(self):
         cache.clear()
         _reset_inprocess_agent_caches()
@@ -622,34 +672,154 @@ class ProactiveCheckinTaskTests(TestCase):
             student_id=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
         )
 
-    @mock.patch("notifications.services.send_push_notification_task.delay")
-    def test_task_nudges_every_eligible_student_once(self, mock_delay):
+    @mock.patch("notifications.tasks.run_proactive_checkin_batch_task.delay")
+    def test_task_dispatches_one_batch_for_all_eligible_students(self, mock_batch_delay):
         from notifications.tasks import run_proactive_checkins_task
 
         result = run_proactive_checkins_task()
 
-        self.assertEqual(result["sent"], 2)
-        self.assertEqual(
-            NotificationLog.objects.filter(event_type=NotificationLog.EventType.PROACTIVE_CHECKIN).count(), 2
-        )
+        self.assertEqual(result["students"], 2)
+        self.assertEqual(result["dispatched_batches"], 1)
+        mock_batch_delay.assert_called_once()
+        batch_student_ids, _cooldown_days = mock_batch_delay.call_args[0]
+        self.assertCountEqual(batch_student_ids, [self.student_a_id, self.student_b_id])
 
-    @mock.patch("notifications.services.send_push_notification_task.delay")
-    def test_task_skips_students_without_a_real_account(self, mock_delay):
+    @mock.patch("notifications.tasks.run_proactive_checkin_batch_task.delay")
+    def test_task_skips_students_without_a_real_account(self, mock_batch_delay):
         from notifications.tasks import run_proactive_checkins_task
 
         StudentProfile.objects.create(student_id="ghost-profile", name="Ghost", gaps=["orphan gap"])
 
         result = run_proactive_checkins_task()
 
-        self.assertEqual(result["sent"], 2)  # only Alice and Bob, not the ghost profile
-        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["students"], 2)  # only Alice and Bob, not the ghost profile
 
-    @mock.patch("notifications.services.send_push_notification_task.delay")
-    def test_task_second_run_same_day_skips_everyone(self, mock_delay):
+    @mock.patch("notifications.tasks.run_proactive_checkin_batch_task.delay")
+    def test_task_batches_students_at_configured_size(self, mock_batch_delay):
+        from django.test import override_settings
+
         from notifications.tasks import run_proactive_checkins_task
 
-        run_proactive_checkins_task()
-        second_result = run_proactive_checkins_task()
+        with override_settings(PROACTIVE_CHECKIN_BATCH_SIZE=1):
+            result = run_proactive_checkins_task()
 
-        self.assertEqual(second_result["sent"], 0)
+        self.assertEqual(result["dispatched_batches"], 2)
+        self.assertEqual(mock_batch_delay.call_count, 2)
+
+
+class ProactiveCheckinBatchTaskTests(TestCase):
+    """The actual per-student work (build message, write chat message,
+    queue push) that run_proactive_checkins_task used to do inline now
+    happens here, bounded to one batch -- and pushes go out as a single
+    call to send_push_notifications_batch_task instead of one per student."""
+
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student_a, self.student_a_id = make_student_client(email="proactive-batch-a@example.com")
+        self.student_b, self.student_b_id = make_student_client(email="proactive-batch-b@example.com")
+        StudentProfile.objects.update_or_create(
+            student_id=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
+        )
+        StudentProfile.objects.update_or_create(
+            student_id=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
+        )
+
+    @mock.patch("notifications.tasks.send_push_notifications_batch_task.delay")
+    def test_batch_queues_logs_without_individual_dispatch(self, mock_batch_send):
+        from notifications.tasks import run_proactive_checkin_batch_task
+
+        result = run_proactive_checkin_batch_task([self.student_a_id, self.student_b_id], 7)
+
+        self.assertEqual(result["queued"], 2)
+        self.assertEqual(result["skipped"], 0)
+        logs = NotificationLog.objects.filter(event_type=NotificationLog.EventType.PROACTIVE_CHECKIN)
+        self.assertEqual(logs.count(), 2)
+        # queue_push=False -- these stay PENDING until the batch push task runs.
+        self.assertTrue(all(log.status == NotificationLog.Status.PENDING for log in logs))
+        mock_batch_send.assert_called_once()
+        (queued_log_ids,), _kwargs = mock_batch_send.call_args
+        self.assertEqual(set(queued_log_ids), set(logs.values_list("id", flat=True)))
+
+    @mock.patch("notifications.tasks.send_push_notifications_batch_task.delay")
+    def test_second_batch_run_same_day_skips_everyone(self, mock_batch_send):
+        from notifications.tasks import run_proactive_checkin_batch_task
+
+        run_proactive_checkin_batch_task([self.student_a_id, self.student_b_id], 7)
+        second_result = run_proactive_checkin_batch_task([self.student_a_id, self.student_b_id], 7)
+
+        self.assertEqual(second_result["queued"], 0)
         self.assertEqual(second_result["skipped"], 2)
+
+
+class SendPushNotificationsBatchTaskTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        _reset_inprocess_agent_caches()
+        self.student_a, self.student_a_id = make_student_client(email="batch-push-a@example.com")
+        self.student_b, self.student_b_id = make_student_client(email="batch-push-b@example.com")
+        from accounts.models import Account
+
+        self.account_a = Account.objects.get(student_id=self.student_a_id)
+        self.account_b = Account.objects.get(student_id=self.student_b_id)
+        self.token_a = PushToken.objects.create(account=self.account_a, token="ExponentPushToken[a]")
+        self.token_b = PushToken.objects.create(account=self.account_b, token="ExponentPushToken[b]")
+        self.log_a = NotificationLog.objects.create(
+            account=self.account_a,
+            event_type=NotificationLog.EventType.PROACTIVE_CHECKIN,
+            title="Nudge",
+            body="Hi Alice",
+        )
+        self.log_b = NotificationLog.objects.create(
+            account=self.account_b,
+            event_type=NotificationLog.EventType.PROACTIVE_CHECKIN,
+            title="Nudge",
+            body="Hi Bob",
+        )
+
+    @mock.patch("notifications.tasks.check_push_receipts_task.apply_async")
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_sends_all_logs_in_one_expo_call_and_marks_sent(self, mock_send, mock_apply_async):
+        from notifications.tasks import send_push_notifications_batch_task
+
+        mock_send.return_value = [
+            {"status": "ok", "id": "receipt-a"},
+            {"status": "ok", "id": "receipt-b"},
+        ]
+
+        send_push_notifications_batch_task([self.log_a.id, self.log_b.id])
+
+        mock_send.assert_called_once()
+        sent_messages = mock_send.call_args[0][0]
+        self.assertEqual(len(sent_messages), 2)
+        self.log_a.refresh_from_db()
+        self.log_b.refresh_from_db()
+        self.assertEqual(self.log_a.status, NotificationLog.Status.SENT)
+        self.assertEqual(self.log_b.status, NotificationLog.Status.SENT)
+        mock_apply_async.assert_called_once()
+
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_no_token_marks_skipped(self, mock_send):
+        from notifications.tasks import send_push_notifications_batch_task
+
+        self.token_b.delete()
+        mock_send.return_value = [{"status": "ok", "id": "receipt-a"}]
+
+        send_push_notifications_batch_task([self.log_a.id, self.log_b.id])
+
+        self.log_b.refresh_from_db()
+        self.assertEqual(self.log_b.status, NotificationLog.Status.SKIPPED_NO_TOKEN)
+
+    @mock.patch("notifications.expo.send_expo_push_messages")
+    def test_already_sent_logs_are_excluded_from_the_expo_call(self, mock_send):
+        from notifications.tasks import send_push_notifications_batch_task
+
+        self.log_a.status = NotificationLog.Status.SENT
+        self.log_a.save(update_fields=["status"])
+        mock_send.return_value = [{"status": "ok", "id": "receipt-b"}]
+
+        send_push_notifications_batch_task([self.log_a.id, self.log_b.id])
+
+        sent_messages = mock_send.call_args[0][0]
+        self.assertEqual(len(sent_messages), 1)
+        self.assertEqual(sent_messages[0]["to"], self.token_b.token)

@@ -29,3 +29,6 @@ notification_flow.md
 superadmin_all_apis.md
 Patches_to_apply
 Patches_Fixed
+Issues_to_fix_before_deployment.md
+staticfiles/
+.env.prod

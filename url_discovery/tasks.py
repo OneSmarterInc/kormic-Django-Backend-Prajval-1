@@ -2,10 +2,21 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from celery import shared_task
+from django.db import InterfaceError, OperationalError
 from django.utils import timezone
 
 logger = logging.getLogger(__name__)
+
+# Narrowly scoped to genuinely transient infrastructure blips (a DB hiccup
+# or network error before/while the crawler is getting started) rather than
+# a blanket `except Exception` retry -- the crawler has real side effects
+# (DB writes, an eventual scrape_now call on auto_apply), so blindly
+# retrying an arbitrary failure that happened deep into a 25-minute crawl
+# risks duplicate work. Anything else still fails the job immediately, same
+# as before.
+_RETRYABLE_EXCEPTIONS = (OperationalError, InterfaceError, httpx.TransportError, httpx.TimeoutException)
 
 # The project's global CELERY_TASK_TIME_LIMIT is 30s, sized for quick tasks
 # like push notifications. A discovery crawl legitimately runs for minutes,
@@ -21,7 +32,8 @@ DISCOVERY_HARD_TIME_LIMIT = 30 * 60
 
 @shared_task(
     bind=True,
-    max_retries=0,
+    max_retries=1,
+    default_retry_delay=15,
     soft_time_limit=DISCOVERY_SOFT_TIME_LIMIT,
     time_limit=DISCOVERY_HARD_TIME_LIMIT,
 )
@@ -36,6 +48,17 @@ def run_discovery_job(self, job_id: int) -> None:
 
     try:
         DirectUniversityCrawler(job_id).run()
+    except _RETRYABLE_EXCEPTIONS as exc:
+        if self.request.retries < self.max_retries:
+            logger.warning("Discovery job %s hit a transient error, retrying: %s", job_id, exc)
+            raise self.retry(exc=exc)
+        logger.exception("Discovery job %s failed to start (out of retries)", job_id)
+        DiscoveryJob.objects.filter(id=job_id).update(
+            status="failed",
+            error_message="Unexpected error starting the crawler.",
+            completed_at=timezone.now(),
+        )
+        return
     except Exception:
         logger.exception("Discovery job %s failed to start", job_id)
         DiscoveryJob.objects.filter(id=job_id).update(
