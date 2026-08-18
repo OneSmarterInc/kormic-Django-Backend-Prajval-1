@@ -5,9 +5,13 @@ x-app: &app
     # Named volume, not the .:/app bind mount above -- on a Linux host the
     # bind mount is created (and owned) by whatever ran `docker compose up`,
     # which is usually root, and that clobbers the app:app ownership the
-    # Dockerfile set on /app/staticfiles. A named volume is seeded from the
-    # image on first use, so it keeps the image's ownership instead.
+    # Dockerfile set on /app/staticfiles and /app/uploads. A named volume is
+    # seeded from the image on first use, so it keeps the image's ownership
+    # instead. uploads is real user data (student chat attachments etc, see
+    # MEDIA_ROOT in settings.py) so this also makes it persist independently
+    # of whatever the host checkout looks like.
     - static_data:/app/staticfiles
+    - uploads_data:/app/uploads
   env_file:
     - .env
   environment:
@@ -125,3 +129,4 @@ volumes:
   redis_data:
   postgres_data:
   static_data:
+  uploads_data:
