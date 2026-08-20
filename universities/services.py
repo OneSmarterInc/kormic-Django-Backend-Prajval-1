@@ -162,6 +162,33 @@ def sync_profile_facts_to_kb(university: University) -> None:
             confidence=1.0,
         )
 
+from universities.models import ScrapeJob
+from universities.tasks import run_scrape_now_job
+def start_scrape_job(university: University) -> "ScrapeJob":
+    """Queue a Celery run of scrape_now() for this university instead of
+    running it in the request. Raises ValueError if a run is already in
+    progress, mirroring start_discovery's guard against duplicate jobs."""
+
+    active = university.scrape_jobs.filter(status__in=ScrapeJob.ACTIVE_STATUSES).first()
+    if active:
+        raise ValueError(f"A scrape is already in progress for this university (job {active.id}).")
+
+    job = ScrapeJob.objects.create(university=university)
+    run_scrape_now_job.delay(job.id)
+    return job
+
+
+def serialize_scrape_job(job: "ScrapeJob") -> Dict[str, Any]:
+    return {
+        "id": job.id,
+        "status": job.status,
+        "result": job.result,
+        "error_message": job.error_message,
+        "started_at": job.started_at,
+        "completed_at": job.completed_at,
+        "created_at": job.created_at,
+    }
+
 
 _ALREADY_SCRAPED_REASON = (
     "Skipped -- this URL's content is already captured in the knowledge base. "

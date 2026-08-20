@@ -1,6 +1,16 @@
 anthropic>=0.110.0
 langgraph>=1.2.0
 langchain-anthropic>=1.4.0
+# Durable, multi-worker-safe backend for pure_multi_agent.runtime's LangGraph
+# checkpointer (replaces the in-process MemorySaver -- see runtime.py's
+# _build_checkpointer). Uses the same Postgres database Django already
+# talks to via psycopg2-binary above; psycopg[binary] is a separate driver
+# (psycopg v3, required by langgraph-checkpoint-postgres) bundling its own
+# libpq, same reason psycopg2-binary was chosen over plain psycopg2 -- no
+# system libpq needs to be installed in the container.
+langgraph-checkpoint-postgres>=3.1.0
+psycopg[binary]>=3.2.0
+psycopg-pool>=3.2.0
 requests==2.31.0
 beautifulsoup4==4.12.0
 httpx==0.28.1

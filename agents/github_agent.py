@@ -20,6 +20,11 @@ console = Console()
 MODEL = "claude-haiku-4-5-20251001"
 
 
+# Bounds the assessment-synthesis call so a hung upstream request can't
+# hold the request worker indefinitely (see GitHubAnalyzeAPIView).
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+
+
 def _get_anthropic_client() -> anthropic.Anthropic:
     """
     Create Anthropic client only when assessment synthesis is required.
@@ -32,7 +37,7 @@ def _get_anthropic_client() -> anthropic.Anthropic:
             "ANTHROPIC_API_KEY not found. Falling back to rule-based GitHub assessment."
         )
 
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 
 class GitHubSkillsAgent:

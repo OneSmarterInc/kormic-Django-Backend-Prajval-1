@@ -7,6 +7,7 @@ divergences; re-uploads never overwrite claimed rows.
 import io
 import re
 from copy import deepcopy
+from unittest import mock
 
 from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
@@ -239,20 +240,48 @@ class ClaimFlowTests(TestCase):
         self.assertEqual(lst["unclaimed_count"], 1)
 
     @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
-    def test_send_invites_emails_unclaimed_rows_and_is_idempotent(self):
+    @mock.patch("institutes_list.views.send_invite_email_task.delay")
+    def test_send_invites_emails_unclaimed_rows_and_is_idempotent(self, mock_delay):
+        # The actual SMTP send now happens in send_invite_email_task
+        # (Celery), not inline -- see institutes_list/tasks.py. The view's
+        # job is just to mark invited_at and queue one task per row, so
+        # that's what this test verifies; send_invite_email_task itself is
+        # covered separately below.
         user = get_user_model().objects.get(username="officer@wsfi.edu")
         self.client.force_authenticate(user=user)
-        mail.outbox = []
 
         resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json()["invites_sent"], 2)
-        self.assertEqual(len(mail.outbox), 2)
-        self.assertIn("https://app.kormic.example/claim?token=", mail.outbox[0].body)
+        self.assertEqual(mock_delay.call_count, 2)
+
+        queued_ids = {call.args[0] for call in mock_delay.call_args_list}
+        self.assertEqual(
+            queued_ids,
+            set(ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).values_list("id", flat=True)),
+        )
+        self.assertTrue(
+            ListedStudent.objects.filter(source_list_id=self.upload["list_id"], invited_at__isnull=True).count() == 0
+        )
 
         # calling again does not re-invite already-invited unclaimed rows
+        mock_delay.reset_mock()
         resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
         self.assertEqual(resp.json()["invites_sent"], 0)
+        mock_delay.assert_not_called()
+
+    @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
+    def test_send_invite_email_task_sends_claim_link(self):
+        from institutes_list.tasks import send_invite_email_task
+
+        mail.outbox = []
+        row = ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).first()
+
+        send_invite_email_task(row.id)
+
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("https://app.kormic.example/claim?token=", mail.outbox[0].body)
+        self.assertEqual(mail.outbox[0].to, [row.email])
 
     def test_send_invites_requires_claim_page_url_configured(self):
         user = get_user_model().objects.get(username="officer@wsfi.edu")

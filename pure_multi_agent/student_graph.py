@@ -18,10 +18,25 @@ MODEL_NAME = "claude-haiku-4-5-20251001"
 _model = None
 
 
+# Every turn can chain up to `recursion_limit` (see runtime.run_turn) model
+# calls in a tool loop. With no timeout, a single hung upstream call ties up
+# a Django worker indefinitely -- on the highest-traffic endpoint in the
+# system, that's the fastest path to exhausting the whole worker pool.
+# timeout bounds each individual call; max_retries=1 keeps the worst case
+# for one call predictable (timeout + one retry) instead of the SDK's
+# default 2 retries compounding it further.
+CHAT_MODEL_TIMEOUT_SECONDS = 120.0
+
+
 def _get_model() -> ChatAnthropic:
     global _model
     if _model is None:
-        _model = ChatAnthropic(model=MODEL_NAME, max_tokens=1200)
+        _model = ChatAnthropic(
+            model=MODEL_NAME,
+            max_tokens=1200,
+            timeout=CHAT_MODEL_TIMEOUT_SECONDS,
+            max_retries=1,
+        )
     return _model
 
 

@@ -20,6 +20,13 @@ console = Console()
 MODEL = "claude-haiku-4-5-20251001"
 
 
+# UniversityAgent.answer() is called synchronously from the student's chat
+# turn (via agents.commons) -- bounding this call keeps a hung upstream
+# request from holding the chat worker indefinitely, same reasoning as
+# pure_multi_agent.student_graph.CHAT_MODEL_TIMEOUT_SECONDS.
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+
+
 def _get_anthropic_client() -> anthropic.Anthropic:
     """Create Anthropic client only when an LLM call is required."""
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -27,7 +34,7 @@ def _get_anthropic_client() -> anthropic.Anthropic:
             "ANTHROPIC_API_KEY not found. Add it to your .env file before using university agents."
         )
 
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 
 class UniversityAgent:
@@ -918,13 +925,7 @@ QUESTION:
                 "kb_size": self.kb.stats()["total_entries"],
             }
 
-        self.kb.store(
-            topic=f"Q: {question[:120]}",
-            content=answer_text[:500],
-            source_type="conversation",
-            confidence=confidence,
-        )
-
+        # Deliberately NOT writing this Q&A back into self.kb
         result = {
             "university": self.persona["name"],
             "agent_name": self.persona["agent_name"],
@@ -1057,11 +1058,5 @@ STUDENT PROFILE:
         assessment["university"] = self.persona["name"]
         assessment["agent"] = self.persona["agent_name"]
 
-        self.kb.store(
-            topic=f"Fit assessment for {student_package.get('name', 'student')}",
-            content=str(assessment.get("fit_summary", ""))[:500],
-            source_type="conversation",
-            confidence=0.9,
-        )
-
+        # Deliberately NOT written to self.kb -- to prevent cross-student leak 
         return assessment

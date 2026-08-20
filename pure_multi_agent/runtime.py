@@ -4,15 +4,17 @@
 # caching the context across turns let the agent answer from a
 # snapshot that could be minutes or hours stale. Only the LangGraph
 # `messages` state (conversation history) is intentionally kept
-# in-process via the shared checkpointer below, since that's genuinely
-# turn-to-turn conversational state with no other durable home.
+# out of _load_context()/_persist_context() -- it lives in the
+# checkpointer below instead, since that's genuinely turn-to-turn
+# conversational state with no other durable home.
 from __future__ import annotations
 
+import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.memory import MemorySaver
 from rich.console import Console
 
 from pure_multi_agent import preprocessing, prompts
@@ -20,14 +22,56 @@ from pure_multi_agent.student_graph import build_student_agent
 from pure_multi_agent.tracing import VERBOSE, GraphTraceLogger
 
 console = Console()
+logger = logging.getLogger(__name__)
 
-# Shared checkpointer so conversation history (the `messages` state) persists
-# across per-turn graph rebuilds, keyed by thread_id=student key.
-# In-process-only lifetime -- lost on worker restart, not shared across
-# worker processes. (Swapping in a DB/Redis-backed checkpointer is a real
-# follow-up if this ever runs behind more than one worker process, but is
-# an infrastructure change, not something to fix silently here.)
-_checkpointer = MemorySaver()
+
+def _build_checkpointer():
+    """
+    Shared checkpointer so conversation history (the `messages` state)
+    persists across per-turn graph rebuilds, keyed by thread_id=student key.
+
+    Backed by the same Postgres database Django already uses, via a
+    per-process connection pool (langgraph-checkpoint-postgres) -- not
+    LangGraph's in-memory MemorySaver. MemorySaver keeps state only in the
+    worker process that first handled a student's message: with more than
+    one gunicorn worker (the normal deployment shape, see GUNICORN_WORKERS)
+    a student's next message can land on a different worker and the agent
+    silently "forgets" mid-conversation, state is lost on every
+    restart/deploy, and the in-process dict never evicts so memory grows for
+    the life of the process. A durable, shared backend fixes all three.
+    """
+    from django.conf import settings
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool
+    from langgraph.checkpoint.postgres import PostgresSaver
+
+    db = settings.DATABASES["default"]
+    conninfo = (
+        f"dbname={db['NAME']} user={db['USER']} password={db['PASSWORD']} "
+        f"host={db['HOST']} port={db['PORT']}"
+    )
+    pool = ConnectionPool(
+        conninfo=conninfo,
+        min_size=1,
+        max_size=int(os.environ.get("AGENT_CHECKPOINTER_POOL_SIZE", "5")),
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+        open=True,
+    )
+    saver = PostgresSaver(pool)
+    try:
+        # Idempotent (CREATE TABLE IF NOT EXISTS + a migrations-version
+        # table) -- safe to call from every worker process on startup. Only
+        # swallow failures here rather than crashing Django's boot: a
+        # transient DB hiccup at import time shouldn't take the whole
+        # process down when every other Django subsystem already tolerates
+        # the DB being briefly unreachable at startup.
+        saver.setup()
+    except Exception:
+        logger.exception("Agent checkpointer setup() failed -- will retry lazily on first use.")
+    return saver
+
+
+_checkpointer = _build_checkpointer()
 
 
 def _load_context(student_id: str) -> Dict[str, Any]:
@@ -121,8 +165,8 @@ def _extract_reply_text(result: Dict[str, Any]) -> str:
 
 def reset_conversation(student_id: str) -> None:
     """
-    Wipe this student's in-process LangGraph conversational state (the
-    `messages` checkpoint), so the next run_turn starts with no prior turns
+    Wipe this student's LangGraph conversational state (the `messages`
+    checkpoint), so the next run_turn starts with no prior turns
     in context -- i.e. a genuine "new chat", not just a cleared-looking
     transcript that still secretly informs the next reply. Callers also need
     to delete the student's persisted ChatMessage rows (the visible
@@ -137,7 +181,7 @@ def reset_conversation(student_id: str) -> None:
 
 def seed_conversation(student_id: str, turns: List[Tuple[str, str]]) -> None:
     """
-    Reset this student's in-process LangGraph thread and, if `turns` is
+    Reset this student's LangGraph thread and, if `turns` is
     non-empty, pre-load it with a known-good prefix of prior turns
     (oldest-first (sender, content) pairs, sender being "user"/"assistant")
     with no model call involved. Used by the chat "edit message" flow: after

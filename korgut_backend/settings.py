@@ -126,6 +126,13 @@ DATABASES = {
     }
 }
 
+# See korgut_backend/test_runner.py: pure_multi_agent.runtime's checkpointer
+# pool is a separate psycopg v3 connection outside django.db.connections, so
+# it must be closed explicitly before `manage.py test` drops the test
+# database, or teardown fails with "database is being accessed by other
+# users" on every run after the first.
+TEST_RUNNER = "korgut_backend.test_runner.KormicTestRunner"
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -265,11 +272,16 @@ CACHES = {
 
 
 # Celery -- background delivery for push notifications (see notifications/).
-# Chat/agent processing itself stays synchronous (pure_multi_agent.runtime
-# keeps its LangGraph checkpointer in-process, keyed by worker; routing that
-# through Celery would split a student's conversation across worker
-# processes). Celery is used only for the "send this push" side-effect,
-# which is safely fire-and-forget.
+# Chat/agent processing itself stays synchronous: a student's app is waiting
+# on the HTTP response for their reply, so there's no natural place to hand
+# the turn off to a background worker without also building a poll/push
+# mechanism on the client. pure_multi_agent.runtime's LangGraph checkpointer
+# is durable and shared (Postgres-backed, not in-process) precisely so this
+# synchronous-per-request model is safe to run behind more than one gunicorn
+# worker -- see pure_multi_agent/runtime.py's _build_checkpointer(). Celery
+# is used for the "send this push" side-effect, which is safely
+# fire-and-forget, plus other genuinely background jobs (see
+# institutes_list/tasks.py, universities/tasks.py).
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/1")

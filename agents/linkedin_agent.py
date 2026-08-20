@@ -15,7 +15,11 @@ import anthropic
 from rich.console import Console
 
 console = Console()
-client = anthropic.Anthropic()
+
+# Bounds the extraction call so a hung upstream request can't hold the
+# request worker indefinitely (see LinkedInAnalyzeAPIView).
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+client = anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 1200

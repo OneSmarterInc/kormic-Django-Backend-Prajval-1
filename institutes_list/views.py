@@ -22,6 +22,7 @@ from accounts.models import Account
 from institutes.models import Institute
 
 from .models import ListedStudent, UniversityStudentList
+from .tasks import send_invite_email_task
 from .throttling import (
     ClaimStartEmailThrottle,
     ClaimStartIPThrottle,
@@ -316,6 +317,15 @@ def send_invites(request, list_id):
     (CLAIM_PAGE_URL?token=...). Safe to call again after a re-upload --
     already-invited rows are skipped, not re-spammed; pass "resend": true to
     override that and re-invite everyone unclaimed regardless.
+
+    The actual SMTP sends happen in Celery (institutes_list.tasks.
+    send_invite_email_task), one task per row, instead of a loop of
+    synchronous send_mail() calls in this request -- a 200-row batch used to
+    mean 200 sequential SMTP round-trips in one HTTP request, easily
+    exceeding a proxy/load-balancer timeout. invited_at is still marked here
+    synchronously (a cheap bulk DB update) so the idempotency contract above
+    holds immediately, even while the emails are still draining from the
+    queue.
     """
     account, error = _require_institute_or_superuser(request)
     if error:
@@ -336,28 +346,13 @@ def send_invites(request, list_id):
     if not resend:
         rows = rows.filter(invited_at__isnull=True)
 
-    now = timezone.now()
-    sent = 0
-    for row in rows:
-        claim_link = f"{settings.CLAIM_PAGE_URL}?{urlencode({'token': row.claim_token})}"
-        send_mail(
-            subject="You're invited to claim your Kormic profile",
-            message=(
-                f"Hi {row.full_name},\n\n"
-                f"{lst.institute.name} has listed you for a Kormic profile. "
-                f"Claim it here: {claim_link}\n\n"
-                "This link identifies you but reveals nothing on its own -- "
-                "you'll still need to verify your email with a one-time code."
-            ),
-            from_email=None,  # DEFAULT_FROM_EMAIL
-            recipient_list=[row.email],
-            fail_silently=False,
-        )
-        row.invited_at = now
-        row.save(update_fields=["invited_at"])
-        sent += 1
+    row_ids = list(rows.values_list("id", flat=True))
+    ListedStudent.objects.filter(id__in=row_ids).update(invited_at=timezone.now())
 
-    return Response({"list_id": lst.id, "invites_sent": sent})
+    for row_id in row_ids:
+        send_invite_email_task.delay(row_id)
+
+    return Response({"list_id": lst.id, "invites_sent": len(row_ids)})
 
 
 # ---------------------------------------------------------------------------

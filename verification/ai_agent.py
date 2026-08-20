@@ -91,10 +91,15 @@ discrepancy and inviting them to confirm or clarify it -- never accusatory
 If there is nothing worth flagging, return []."""
 
 
+# Bounds the verification call so a hung upstream request can't hold the
+# calling worker indefinitely.
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+
+
 def _get_anthropic_client() -> anthropic.Anthropic:
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise RuntimeError("ANTHROPIC_API_KEY not found. Falling back to rule-based verification.")
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 
 def _clean_model_json_array(raw: str) -> str:

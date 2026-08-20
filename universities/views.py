@@ -486,9 +486,17 @@ class ScrapeUrlsAPIView(APIView):
 class ScrapeNowAPIView(APIView):
     """
     POST /api/university-admin/scrape-urls/scrape-now/
-    Synchronously scrapes every saved URL and stores extracted facts as
-    source_type="scraped" -- the explicit, visible replacement for the old
-    silent KORGUT_AUTO_SCRAPE-gated construction-time scrape.
+    Queues a Celery run of the scrape-every-saved-URL pipeline and returns
+    immediately -- it used to run synchronously in the request, which for a
+    university with 20-30 scrape URLs (each with its own ~1.5s be-polite
+    delay plus an LLM extraction call) could tie up a web worker for
+    minutes. Stores extracted facts as source_type="scraped".
+
+    Returns the queued ScrapeJob (202); poll its status at
+    GET /api/university-admin/scrape-urls/scrape-now/<job_id>/.
+
+    GET (no job_id) returns the most recent scrape job for this university,
+    for a client that reloads mid-run and needs to resume polling.
     """
 
     permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
@@ -501,8 +509,40 @@ class ScrapeNowAPIView(APIView):
         if not university.scrape_urls:
             return _error("No scrape URLs are saved yet. Save some with PUT /api/university-admin/scrape-urls/ first.")
 
-        result = services.scrape_now(university)
-        return Response(result)
+        try:
+            job = services.start_scrape_job(university)
+        except ValueError as exc:
+            return _error(str(exc), status.HTTP_409_CONFLICT)
+        return Response(services.serialize_scrape_job(job), status=status.HTTP_202_ACCEPTED)
+
+    def get(self, request):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.scrape_jobs.first()
+        if job is None:
+            return _error("No scrape job has been run yet.", status.HTTP_404_NOT_FOUND)
+        return Response(services.serialize_scrape_job(job))
+
+
+class ScrapeNowJobDetailAPIView(APIView):
+    """
+    GET /api/university-admin/scrape-urls/scrape-now/<job_id>/
+    Status/result for one scrape job, for polling while it runs.
+    """
+
+    permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
+
+    def get(self, request, job_id: int):
+        university = _get_own_university(request)
+        if university is None:
+            return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
+
+        job = university.scrape_jobs.filter(id=job_id).first()
+        if job is None:
+            return _error("Scrape job not found.", status.HTTP_404_NOT_FOUND)
+        return Response(services.serialize_scrape_job(job))
 
 
 class KnowledgeFactListCreateAPIView(APIView):

@@ -60,6 +60,11 @@ Rules:
 """
 
 
+# Bounds the extraction call so a hung upstream request can't hold the
+# request worker indefinitely (see ResumeUploadAPIView).
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+
+
 def _get_anthropic_client() -> anthropic.Anthropic:
     """Create Anthropic client only when parsing is actually requested."""
     if not os.getenv("ANTHROPIC_API_KEY"):
@@ -67,7 +72,7 @@ def _get_anthropic_client() -> anthropic.Anthropic:
             "ANTHROPIC_API_KEY not found. Add it to your .env file before parsing resumes."
         )
 
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 
 def read_pdf(file_path: str) -> Dict[str, Any]:

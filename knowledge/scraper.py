@@ -30,6 +30,11 @@ HEADERS = {
 }
 
 
+# Bounds each extraction call so a hung upstream request can't hold a
+# worker/Celery task indefinitely -- max_retries=1 
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 240.0
+
+
 def _get_anthropic_client() -> anthropic.Anthropic:
     """
     Create Anthropic client only when fact extraction is requested.
@@ -41,7 +46,7 @@ def _get_anthropic_client() -> anthropic.Anthropic:
             "ANTHROPIC_API_KEY not found. Claude fact extraction is unavailable."
         )
 
-    return anthropic.Anthropic()
+    return anthropic.Anthropic(timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 
 def _clean_whitespace(text: str) -> str:

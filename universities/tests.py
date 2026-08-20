@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest import mock
+
 from django.test import TestCase
 from rest_framework import status
 
@@ -11,7 +13,7 @@ from universities.knowledge_groups import (
     escalation_counts_by_group,
     resolve_group_for_question,
 )
-from universities.models import KnowledgeGroup, University
+from universities.models import KnowledgeGroup, ScrapeJob, University
 
 
 class KnowledgeGroupClassificationTests(TestCase):
@@ -158,3 +160,65 @@ class ManualKnowledgeFactGroupTaggingTests(TestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         self.assertIsNone(resp.data["group"])
+
+
+class ScrapeNowJobTests(TestCase):
+    """
+    ScrapeNowAPIView used to run services.scrape_now() synchronously in the
+    request -- for a university with many scrape_urls this could block a web
+    worker for minutes (each URL costs a be-polite time.sleep(1.5) plus an
+    LLM extraction call). It now queues a Celery job and returns immediately;
+    these tests check the queuing/polling contract, not the scrape itself
+    (that's exercised wherever services.scrape_now already has coverage).
+    """
+
+    def setUp(self):
+        self.client = make_university_client(email="officer3@wsu.edu", university_id="write_state_scrape")
+        self.university = University.objects.get(id="write_state_scrape")
+        self.university.scrape_urls = ["https://write-state.example/admissions"]
+        self.university.save(update_fields=["scrape_urls"])
+
+    @mock.patch("universities.tasks.run_scrape_now_job.delay")
+    def test_post_queues_job_and_returns_202(self, mock_delay):
+        resp = self.client.post("/api/university-admin/scrape-urls/scrape-now/")
+
+        self.assertEqual(resp.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(resp.data["status"], ScrapeJob.Status.QUEUED)
+        job = ScrapeJob.objects.get(id=resp.data["id"])
+        self.assertEqual(job.university_id, self.university.id)
+        mock_delay.assert_called_once_with(job.id)
+
+    @mock.patch("universities.tasks.run_scrape_now_job.delay")
+    def test_post_rejects_second_job_while_one_is_active(self, mock_delay):
+        self.client.post("/api/university-admin/scrape-urls/scrape-now/")
+
+        resp = self.client.post("/api/university-admin/scrape-urls/scrape-now/")
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(mock_delay.call_count, 1)
+
+    def test_post_without_scrape_urls_400s(self):
+        self.university.scrape_urls = []
+        self.university.save(update_fields=["scrape_urls"])
+
+        resp = self.client.post("/api/university-admin/scrape-urls/scrape-now/")
+
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @mock.patch("universities.tasks.run_scrape_now_job.delay")
+    def test_job_detail_polling_reflects_status(self, mock_delay):
+        resp = self.client.post("/api/university-admin/scrape-urls/scrape-now/")
+        job_id = resp.data["id"]
+
+        detail = self.client.get(f"/api/university-admin/scrape-urls/scrape-now/{job_id}/")
+        self.assertEqual(detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(detail.data["status"], ScrapeJob.Status.QUEUED)
+
+        job = ScrapeJob.objects.get(id=job_id)
+        job.status = ScrapeJob.Status.COMPLETED
+        job.result = {"total_facts_stored": 3, "results": []}
+        job.save(update_fields=["status", "result"])
+
+        detail = self.client.get(f"/api/university-admin/scrape-urls/scrape-now/{job_id}/")
+        self.assertEqual(detail.data["status"], ScrapeJob.Status.COMPLETED)
+        self.assertEqual(detail.data["result"]["total_facts_stored"], 3)

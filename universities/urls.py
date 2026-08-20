@@ -13,6 +13,11 @@ urlpatterns = [
     path("scrape-urls/", views.ScrapeUrlsAPIView.as_view(), name="university-admin-scrape-urls"),
     path("scrape-urls/scrape-now/", views.ScrapeNowAPIView.as_view(), name="university-admin-scrape-now"),
     path(
+        "scrape-urls/scrape-now/<int:job_id>/",
+        views.ScrapeNowJobDetailAPIView.as_view(),
+        name="university-admin-scrape-now-detail",
+    ),
+    path(
         "scrape-urls/auto-discover/",
         views.AutoDiscoverUrlsAPIView.as_view(),
         name="university-admin-auto-discover",

@@ -14,7 +14,10 @@ api_key = os.getenv("ANTHROPIC_API_KEY")
 if not api_key:
     raise ValueError("ANTHROPIC_API_KEY not found. Check your .env file.")
 
-client = anthropic.Anthropic(api_key=api_key)
+# Bounds every call so a hung upstream request can't hold the request
+# worker indefinitely.
+ANTHROPIC_CLIENT_TIMEOUT_SECONDS = 120.0
+client = anthropic.Anthropic(api_key=api_key, timeout=ANTHROPIC_CLIENT_TIMEOUT_SECONDS, max_retries=1)
 
 MODEL = os.getenv("PROFILE_PRESENTER_MODEL", "claude-haiku-4-5-20251001")
 

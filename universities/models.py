@@ -79,3 +79,34 @@ class KnowledgeGroup(models.Model):
 
     def __str__(self) -> str:
         return f"KnowledgeGroup({self.university_id}, {self.slug})"
+
+
+class ScrapeJob(models.Model):
+    """
+    Mirrors url_discovery.DiscoveryJob's
+    queued/running/completed/failed shape, deliberately smaller since a
+    scrape run has no per-page progress worth tracking, just a final result.
+    """
+
+    class Status(models.TextChoices):
+        QUEUED = "queued", "Queued"
+        RUNNING = "running", "Running"
+        COMPLETED = "completed", "Completed"
+        FAILED = "failed", "Failed"
+
+    ACTIVE_STATUSES = ("queued", "running")
+
+    university = models.ForeignKey(University, on_delete=models.CASCADE, related_name="scrape_jobs")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED, db_index=True)
+    result = models.JSONField(default=dict, blank=True)
+    error_message = models.CharField(max_length=1000, blank=True, default="")
+
+    started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"ScrapeJob({self.university_id}, {self.status})"

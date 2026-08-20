@@ -200,18 +200,26 @@ class ChatHistoryTests(TestCase):
 
     @mock.patch("pure_multi_agent.runtime.run_turn")
     def test_new_chat_clears_history_and_conversation_state(self, mock_run_turn):
-        from pure_multi_agent.runtime import _checkpointer
+        # Checked through the checkpointer's public get_tuple()/delete_thread()
+        # interface rather than a backend-specific internal (e.g. MemorySaver's
+        # .storage dict) so this test doesn't care which checkpointer backend
+        # pure_multi_agent.runtime is configured with -- see runtime.py's
+        # _build_checkpointer().
+        from pure_multi_agent.runtime import _checkpointer, seed_conversation
 
         mock_run_turn.side_effect = [("Nova", "Hi there!")]
         self.student.post("/api/chat/agent/", {"message": "Hello"}, format="json")
         self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 2)
 
-        _checkpointer.storage[self.student_id]  # populate a fake checkpoint entry
+        seed_conversation(self.student_id, [("user", "Hello"), ("assistant", "Hi there!")])
+        config = {"configurable": {"thread_id": self.student_id}}
+        self.assertIsNotNone(_checkpointer.get_tuple(config))
+
         resp = self.student.post("/api/chat/agent/new/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["messages_deleted"], 2)
         self.assertEqual(self.student.get("/api/chat/agent/history/").data["count"], 0)
-        self.assertNotIn(self.student_id, _checkpointer.storage)
+        self.assertIsNone(_checkpointer.get_tuple(config))
 
     def test_new_chat_does_not_touch_other_students_history(self):
         other, other_id = make_student_client(email="other-new-chat@example.com")
