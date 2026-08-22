@@ -8,8 +8,9 @@ import base64
 import json
 import os
 import re
+from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
 from rich.console import Console
@@ -18,15 +19,19 @@ console = Console()
 
 MODEL = "claude-haiku-4-5-20251001"
 
-EXTRACTION_PROMPT = """
+
+EXTRACTION_PROMPT_TEMPLATE = """
 You are a resume parser for Korgut, a graduate admissions platform.
 Extract structured information from this student resume.
+
+Today's date is {today}. Use this as "now" whenever the resume says
+"Present", "Current", "Ongoing", or "Now" for an end date.
 
 Return ONLY a valid JSON object with these exact fields.
 No markdown, no explanation, just the JSON.
 
 Required fields (use null if not found, never invent data):
-{
+{{
   "name": string or null,
   "email": string or null,
   "undergraduate_institution": string or null,
@@ -38,35 +43,49 @@ Required fields (use null if not found, never invent data):
   "gre_verbal": integer or null,
   "toefl": integer or null,
   "ielts": float or null,
+  "work_experience_entries": [
+    {{
+      "start_date": "YYYY-MM" or null,
+      "end_date": "YYYY-MM" or null,
+      "is_current": boolean
+    }}
+  ],
   "work_experience_months": integer,
   "work_experience_summary": string or null,
   "research_experience": string or null,
   "publications_count": integer,
   "technical_skills": [list of strings],
   "projects": [
-    {"title": string, "description": string, "technologies": [strings]}
+    {{"title": string, "description": string, "technologies": [strings]}}
   ],
   "inferred_disciplines": [list of strings],
   "gaps": [list of fields that are missing but important],
   "confidence_notes": string
-}
+}}
 
 Rules:
 - Never invent data. If a field is not clearly present, use null.
-- For work_experience_months: total professional work experience, in months.
-  - If explicit start/end dates are given (e.g. "Jan 2022 - Mar 2023"), calculate
-    the number of months from those dates.
-  - If only a duration is stated instead of dates (e.g. "1 year", "18 months",
-    "2+ years of experience"), convert that stated duration directly to months
-    (1 year = 12 months) rather than defaulting to 0.
-  - When there are multiple roles, sum their durations (don't double count
-    overlapping/concurrent roles).
-  - Use 0 only if the resume mentions no work experience at all.
+- For work_experience_entries: one entry per job/internship listed under
+  Experience/Work Experience. Extract the dates EXACTLY as written and
+  normalize to "YYYY-MM" (e.g. "Feb 2024" -> "2024-02", a bare year "2021"
+  -> "2021-01"). If the end date is "Present"/"Current"/"Ongoing"/"Now",
+  set end_date to null and is_current to true. Do NOT calculate durations
+  or months yourself here -- just report the raw dates faithfully. Leave
+  this list empty if no work experience with dates is present.
+- For work_experience_months: only used as a fallback when experience is
+  stated as a plain duration with no dates at all (e.g. "1 year of
+  experience", "6 months internship") -- convert that stated duration to
+  months. If work_experience_entries already captures the dates, you may
+  leave this as 0.
 - For inferred_disciplines: suggest 2-3 graduate disciplines based on
   the student's major, skills, and projects.
 - For gaps: always include 'budget' and 'target_disciplines'.
 - For confidence_notes: one sentence about anything ambiguous or notable.
 """
+
+
+def _build_extraction_prompt() -> str:
+    return EXTRACTION_PROMPT_TEMPLATE.format(today=date.today().isoformat())
 
 
 # Bounds the extraction call so a hung upstream request can't hold the
@@ -225,7 +244,7 @@ class ResumeParserAgent:
                         "role": "user",
                         "content": [
                             document_content,
-                            {"type": "text", "text": EXTRACTION_PROMPT},
+                            {"type": "text", "text": _build_extraction_prompt()},
                         ],
                     }
                 ],
@@ -266,7 +285,7 @@ class ResumeParserAgent:
                 messages=[
                     {
                         "role": "user",
-                        "content": f"RESUME:\n{text}\n\n{EXTRACTION_PROMPT}",
+                        "content": f"RESUME:\n{text}\n\n{_build_extraction_prompt()}",
                     }
                 ],
             )
@@ -369,6 +388,64 @@ class ResumeParserAgent:
 
         return int(round(number))
 
+    def _parse_year_month(self, value: Any) -> Optional[Tuple[int, int]]:
+        """Parse a "YYYY-MM" or "YYYY" string into a (year, month) tuple."""
+        if not value:
+            return None
+
+        match = re.match(r"^(\d{4})(?:-(\d{1,2}))?$", str(value).strip())
+
+        if not match:
+            return None
+
+        year = int(match.group(1))
+        month = int(match.group(2)) if match.group(2) else 1
+
+        if not (1 <= month <= 12):
+            return None
+
+        return year, month
+
+    def _compute_work_months(self, entries: Any) -> Optional[int]:
+        """
+        Deterministically sum work-experience durations from extracted
+        (start_date, end_date, is_current) entries, instead of trusting the
+        model's own month arithmetic. "Present"/is_current resolves against
+        the real current date, not whatever the model assumed "now" to be.
+
+        Returns None (rather than 0) when there's nothing usable to compute,
+        so callers can fall back to the model's work_experience_months.
+        """
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        today = date.today()
+        today_ym = (today.year, today.month)
+        total = 0
+        counted_any = False
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            start = self._parse_year_month(entry.get("start_date"))
+            if start is None:
+                continue
+
+            if entry.get("is_current") or not entry.get("end_date"):
+                end = today_ym
+            else:
+                end = self._parse_year_month(entry.get("end_date"))
+
+            if end is None:
+                continue
+
+            months = (end[0] - start[0]) * 12 + (end[1] - start[1])
+            total += max(months, 0)
+            counted_any = True
+
+        return total if counted_any else None
+
     def _safe_float_or_original(self, value: Any) -> Any:
         try:
             if value in [None, ""]:
@@ -425,6 +502,10 @@ class ResumeParserAgent:
             if str(discipline).strip()
         ]
 
+        work_months = self._compute_work_months(extracted.get("work_experience_entries"))
+        if work_months is None:
+            work_months = self._parse_experience_months(extracted.get("work_experience_months"))
+
         profile = {
             "name": extracted.get("name") or "Student",
             "email": extracted.get("email"),
@@ -438,7 +519,7 @@ class ResumeParserAgent:
             "gre_verbal": self._safe_int(extracted.get("gre_verbal"), None),
             "toefl": self._safe_int(extracted.get("toefl"), None),
             "ielts": self._safe_float_or_original(extracted.get("ielts")),
-            "work_months": self._parse_experience_months(extracted.get("work_experience_months")),
+            "work_months": work_months,
             "work_experience_summary": extracted.get("work_experience_summary"),
             "research": extracted.get("research_experience") or "None stated",
             "publications_count": self._safe_int(extracted.get("publications_count"), 0),
