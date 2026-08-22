@@ -4,7 +4,7 @@ from rest_framework import serializers
 # IntegerField/FloatField's allow_null only tolerates JSON null, not "", so
 # without this they 400 on every empty numeric field.
 NULLABLE_NUMERIC_FIELDS = {
-    "graduation_year", "gpa", "gre_quant", "gre_verbal", "toefl", "ielts", "budget",
+    "graduation_year", "gpa", "gre_quant", "gre_verbal", "toefl", "ielts", "budget", "work_months",
 }
 
 
@@ -29,6 +29,8 @@ class ProfileCreateUpdateSerializer(serializers.Serializer):
     english_score_text = serializers.CharField(required=False, allow_blank=True)
 
     budget = serializers.IntegerField(required=False, allow_null=True)
+    work_months = serializers.IntegerField(required=False, allow_null=True)
+    work_experience_summary = serializers.CharField(required=False, allow_blank=True)
     target_country = serializers.CharField(required=False, allow_blank=True)
     target_degree = serializers.CharField(required=False, allow_blank=True)
     preferred_specialization = serializers.CharField(required=False, allow_blank=True)

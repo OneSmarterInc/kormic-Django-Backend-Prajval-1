@@ -61,6 +61,7 @@ from django_api.services import (
     save_profile_data,
     make_student_id,
     upload_profile_image,
+    ProfileValidationError,
 )
 
 logger = logging.getLogger(__name__)
@@ -279,6 +280,11 @@ class ProfileCreateUpdateAPIView(APIView):
                     "profile": result["profile"],
                 },
                 status=status.HTTP_200_OK,
+            )
+        except ProfileValidationError as exc:
+            return Response(
+                {"status": "error", "errors": exc.errors},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         except Exception as exc:
             return api_error(str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR)

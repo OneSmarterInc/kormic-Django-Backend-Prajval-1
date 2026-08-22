@@ -151,6 +151,22 @@ University Assessments:
     return summary
 
 
+# Score/numeric fields that must never be silently reset to null once a real
+# value is on file. 0 / 0.0 are legitimate values and always accepted; only an
+# explicit attempt to null out an already-set value is rejected.
+NULLABLE_SCORE_FIELDS = {
+    "gpa", "gre_quant", "gre_verbal", "toefl", "ielts", "budget", "graduation_year", "work_months",
+}
+
+
+class ProfileValidationError(ValueError):
+    """Raised when profile update data fails a business-rule validation."""
+
+    def __init__(self, errors: Dict[str, str]):
+        self.errors = errors
+        super().__init__("; ".join(f"{field}: {message}" for field, message in errors.items()))
+
+
 def create_or_update_profile(validated_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(validated_data)
     raw_student_id = data.get("student_id")
@@ -163,12 +179,29 @@ def create_or_update_profile(validated_data: Dict[str, Any]) -> Dict[str, Any]:
     direct_fields = [
         "name", "email", "country", "institution", "major", "program", "graduation_year",
         "gpa", "gpa_scale", "gre_quant", "gre_verbal", "toefl", "ielts", "english_score_text",
-        "budget", "github", "linkedin_url", "notes",
+        "budget", "github", "linkedin_url", "notes", "work_months", "work_experience_summary",
     ]
 
+    null_field_errors: Dict[str, str] = {}
+
     for field in direct_fields:
-        if field in data and data[field] not in [None, ""]:
-            profile[field] = data[field]
+        if field not in data:
+            continue
+
+        value = data[field]
+
+        if value in [None, ""]:
+            if field in NULLABLE_SCORE_FIELDS and profile.get(field) not in [None, ""]:
+                null_field_errors[field] = (
+                    "This field already has a value and cannot be cleared to null. "
+                    "Provide a number (0 is allowed) instead."
+                )
+            continue
+
+        profile[field] = value
+
+    if null_field_errors:
+        raise ProfileValidationError(null_field_errors)
 
     preference_fields = ["target_country", "target_degree", "preferred_specialization"]
     profile.setdefault("preferences", {})

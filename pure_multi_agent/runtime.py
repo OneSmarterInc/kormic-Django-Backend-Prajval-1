@@ -254,10 +254,20 @@ def run_turn(
         )
         reply = _extract_reply_text(result)
     except Exception as exc:
+        logger.exception("Agent turn failed for student %s", ctx["canonical_student_id"])
         console.print(f"[yellow]Agent turn failed: {exc}[/yellow]")
+        # Ops-facing detail (which env var, which upstream, etc.) is for the
+        # alert email only -- a student seeing "check your ANTHROPIC_API_KEY"
+        # would be confusing at best and a config-detail leak at worst.
+        try:
+            from pure_multi_agent.tasks import send_agent_error_alert_task
+
+            send_agent_error_alert_task.delay(str(exc), ctx["canonical_student_id"])
+        except Exception:
+            logger.exception("Failed to queue agent-error alert task")
         reply = (
-            "I hit an error while generating the response. Please check your "
-            "ANTHROPIC_API_KEY, network connection, and model access, then try again."
+            "I hit an error while generating the response, likely a token limit "
+            "issue on our side. Please try again in a little while."
         )
 
     preprocessing.update_memory(ctx, message, reply)

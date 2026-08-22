@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -52,7 +53,15 @@ Required fields (use null if not found, never invent data):
 
 Rules:
 - Never invent data. If a field is not clearly present, use null.
-- For work_experience_months: calculate from dates. Use 0 if no experience.
+- For work_experience_months: total professional work experience, in months.
+  - If explicit start/end dates are given (e.g. "Jan 2022 - Mar 2023"), calculate
+    the number of months from those dates.
+  - If only a duration is stated instead of dates (e.g. "1 year", "18 months",
+    "2+ years of experience"), convert that stated duration directly to months
+    (1 year = 12 months) rather than defaulting to 0.
+  - When there are multiple roles, sum their durations (don't double count
+    overlapping/concurrent roles).
+  - Use 0 only if the resume mentions no work experience at all.
 - For inferred_disciplines: suggest 2-3 graduate disciplines based on
   the student's major, skills, and projects.
 - For gaps: always include 'budget' and 'target_disciplines'.
@@ -332,6 +341,34 @@ class ResumeParserAgent:
         except Exception:
             return default
 
+    def _parse_experience_months(self, value: Any) -> int:
+        """
+        Convert an extracted work-experience duration into total months.
+
+        Usually this is already a plain integer, but the model occasionally
+        returns a duration phrase like "1 year" or "6 months" instead of a
+        bare number -- without this, that string fails int()/float() and
+        silently collapses to 0 even though the resume states real experience.
+        """
+        if value in [None, ""]:
+            return 0
+
+        if isinstance(value, (int, float)):
+            return int(value)
+
+        text = str(value).strip().lower()
+        match = re.search(r"(\d+(?:\.\d+)?)", text)
+
+        if not match:
+            return 0
+
+        number = float(match.group(1))
+
+        if "year" in text or "yr" in text:
+            return int(round(number * 12))
+
+        return int(round(number))
+
     def _safe_float_or_original(self, value: Any) -> Any:
         try:
             if value in [None, ""]:
@@ -401,7 +438,7 @@ class ResumeParserAgent:
             "gre_verbal": self._safe_int(extracted.get("gre_verbal"), None),
             "toefl": self._safe_int(extracted.get("toefl"), None),
             "ielts": self._safe_float_or_original(extracted.get("ielts")),
-            "work_months": self._safe_int(extracted.get("work_experience_months"), 0),
+            "work_months": self._parse_experience_months(extracted.get("work_experience_months")),
             "work_experience_summary": extracted.get("work_experience_summary"),
             "research": extracted.get("research_experience") or "None stated",
             "publications_count": self._safe_int(extracted.get("publications_count"), 0),

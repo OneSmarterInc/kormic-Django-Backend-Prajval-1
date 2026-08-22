@@ -9,6 +9,8 @@ app = Celery("korgut_backend")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 
+app.autodiscover_tasks(["pure_multi_agent"])
+
 
 # Celery never fires Django's request_finished signal (that's HTTP-cycle
 # only), so nothing normally closes a worker's DB connection once it's

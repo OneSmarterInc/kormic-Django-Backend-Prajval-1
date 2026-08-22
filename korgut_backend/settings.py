@@ -319,6 +319,13 @@ CELERY_BEAT_SCHEDULE = {
         "task": "notifications.tasks.run_proactive_checkins_task",
         "schedule": crontab(hour=PROACTIVE_CHECKIN_HOUR, minute=0),
     },
+    # See pure_multi_agent.tasks.check_agent_recovery_task: runs every few
+    # minutes but only ever costs a Redis read unless an outage is actually
+    # flagged, so this cadence doesn't translate into real LLM spend.
+    "agent-recovery-check": {
+        "task": "pure_multi_agent.tasks.check_agent_recovery_task",
+        "schedule": crontab(minute="*/5"),
+    },
 }
 
 # Expo push notifications (student mobile app).
@@ -348,6 +355,14 @@ else:
     EMAIL_HOST_USER = os.environ["EMAIL_HOST_USER"]
     EMAIL_HOST_PASSWORD = os.environ["EMAIL_HOST_PASSWORD"]
     DEFAULT_FROM_EMAIL = os.environ["DEFAULT_FROM_EMAIL"]
+
+# Who gets emailed when the student agent starts failing (e.g. Anthropic
+# credit exhaustion) and again once it recovers -- see
+# extra_utils.send_mail_to_superuser and pure_multi_agent.tasks. Comma-
+# separated; empty means no one is notified (a warning is logged instead).
+AGENT_ALERT_EMAILS = [
+    addr.strip() for addr in os.getenv("AGENT_ALERT_EMAILS", "").split(",") if addr.strip()
+]
 
 # Frontend page the claim-invite email links to, e.g. "https://app.kormic.com/claim"
 # (the student lands there with ?token=... and the page calls /api/claim/start/).
