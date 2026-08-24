@@ -14,6 +14,7 @@ from django.contrib.auth import get_user_model
 from django.core import mail
 from django.core.cache import cache
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import Account
@@ -288,6 +289,76 @@ class ClaimFlowTests(TestCase):
         self.client.force_authenticate(user=user)
         resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
         self.assertEqual(resp.status_code, 500)
+
+    @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
+    @mock.patch("institutes_list.views.send_invite_email_task.delay")
+    def test_send_invite_resends_a_single_already_invited_row(self, mock_delay):
+        # send_invites' bulk pass skips already-invited rows on purpose --
+        # send_invite is the explicit "resend to just this one student"
+        # action and must NOT skip, even though invited_at is already set.
+        user = get_user_model().objects.get(username="officer@wsfi.edu")
+        self.client.force_authenticate(user=user)
+        row = ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).first()
+        row.invited_at = timezone.now()
+        row.save(update_fields=["invited_at"])
+        first_invited_at = row.invited_at
+
+        resp = self.client.post(
+            f"/api/institute-lists/lists/{self.upload['list_id']}/students/{row.id}/send-invite/"
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["student_id"], row.id)
+        mock_delay.assert_called_once_with(row.id)
+
+        row.refresh_from_db()
+        self.assertGreater(row.invited_at, first_invited_at)
+
+    @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
+    @mock.patch("institutes_list.views.send_invite_email_task.delay")
+    def test_send_invite_rejects_a_claimed_row(self, mock_delay):
+        user = get_user_model().objects.get(username="officer@wsfi.edu")
+        self.client.force_authenticate(user=user)
+        row = ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).first()
+        row.status = ListedStudent.Status.CLAIMED
+        row.save(update_fields=["status"])
+
+        resp = self.client.post(
+            f"/api/institute-lists/lists/{self.upload['list_id']}/students/{row.id}/send-invite/"
+        )
+        self.assertEqual(resp.status_code, 400)
+        mock_delay.assert_not_called()
+
+    @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
+    def test_send_invite_404s_for_a_student_on_a_different_list(self):
+        user = get_user_model().objects.get(username="officer@wsfi.edu")
+        self.client.force_authenticate(user=user)
+        other = register_institute("Some Other Institute")
+        other_list = UniversityStudentList.objects.create(institute=other, contact_name="x", contact_email="x@x.com")
+        other_row = ListedStudent.objects.create(
+            source_list=other_list,
+            institute_id=other.id,
+            full_name="Other Student",
+            email="other.student@gmail.com",
+        )
+
+        resp = self.client.post(
+            f"/api/institute-lists/lists/{self.upload['list_id']}/students/{other_row.id}/send-invite/"
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_send_invite_rejects_a_different_institute(self):
+        other = register_institute("Some Other Institute")
+        other_user = get_user_model().objects.create_user(
+            username="officer2@other.edu", email="officer2@other.edu", password="x"
+        )
+        Account.objects.create(user=other_user, role=Account.Role.INSTITUTE, institute_id=other.id)
+        self.client.force_authenticate(user=other_user)
+        row = ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).first()
+
+        resp = self.client.post(
+            f"/api/institute-lists/lists/{self.upload['list_id']}/students/{row.id}/send-invite/"
+        )
+        self.assertEqual(resp.status_code, 403)
 
 
 def _throttled_rest_framework() -> dict:

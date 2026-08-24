@@ -7,6 +7,11 @@ urlpatterns = [
     path("institute-lists/lists/", views.list_lists, name="institute-list-lists"),
     path("institute-lists/lists/<int:list_id>/students/", views.list_students, name="institute-list-students"),
     path("institute-lists/lists/<int:list_id>/send-invites/", views.send_invites, name="institute-list-send-invites"),
+    path(
+        "institute-lists/lists/<int:list_id>/students/<int:student_id>/send-invite/",
+        views.send_invite,
+        name="institute-list-send-invite",
+    ),
     path("claim/start/", views.start_claim, name="claim-start"),
     path("claim/verify/", views.verify_claim, name="claim-verify"),
     path("claim/confirm/", views.confirm_claim, name="claim-confirm"),

@@ -41,7 +41,8 @@ def send_invite_email_task(self, listed_student_id: int) -> None:
                 f"Hi {row.full_name},\n\n"
                 f"{row.source_list.institute.name} has listed you for a Kormic profile. "
                 f"Claim it here: {claim_link}\n\n"
-                "This link identifies you but reveals nothing on its own -- "
+                f"Already have the app open? Enter this token directly instead: {row.claim_token}\n\n"
+                "This link/token identifies you but reveals nothing on its own -- "
                 "you'll still need to verify your email with a one-time code."
             ),
             from_email=None,  # DEFAULT_FROM_EMAIL

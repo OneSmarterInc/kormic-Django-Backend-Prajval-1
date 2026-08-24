@@ -355,6 +355,52 @@ def send_invites(request, list_id):
     return Response({"list_id": lst.id, "invites_sent": len(row_ids)})
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def send_invite(request, list_id, student_id):
+    """
+    POST /api/institute-lists/lists/<list_id>/students/<student_id>/send-invite/
+    Explicitly (re-)sends the claim-link invite to exactly one row, even if
+    it was already invited -- unlike send_invites' bulk pass, which skips
+    already-invited rows unless the whole list is resent with "resend":
+    true. This is the "resend to just this one student" action from the
+    roster UI, not a bulk operation.
+
+    Still refuses to invite a row that isn't UNCLAIMED (already claimed/
+    revoked/expired rows have nothing left to claim), and still requires
+    CLAIM_PAGE_URL like send_invites.
+    """
+    account, error = _require_institute_or_superuser(request)
+    if error:
+        return error
+
+    lst, error = _get_owned_list(account, list_id)
+    if error:
+        return error
+
+    if not settings.CLAIM_PAGE_URL:
+        return Response(
+            {"error": "CLAIM_PAGE_URL is not configured on the server -- set it before sending invites."},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+    row = lst.students.filter(id=student_id).first()
+    if row is None:
+        return Response({"error": "student not found on this list"}, status=status.HTTP_404_NOT_FOUND)
+
+    if row.status != ListedStudent.Status.UNCLAIMED:
+        return Response(
+            {"error": f"cannot invite a student with status {row.status!r} -- nothing left to claim"},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    row.invited_at = timezone.now()
+    row.save(update_fields=["invited_at"])
+    send_invite_email_task.delay(row.id)
+
+    return Response({"list_id": lst.id, "student_id": row.id, "invited_at": row.invited_at})
+
+
 # ---------------------------------------------------------------------------
 # Claim flow (student side; unauthenticated by design -- the OTP is the auth)
 # ---------------------------------------------------------------------------

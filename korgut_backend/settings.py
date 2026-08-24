@@ -15,6 +15,7 @@ from datetime import timedelta
 from pathlib import Path
 
 from celery.schedules import crontab
+from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -332,29 +333,69 @@ CELERY_BEAT_SCHEDULE = {
 EXPO_PUSH_ACCESS_TOKEN = os.environ.get("EXPO_PUSH_ACCESS_TOKEN", "")
 
 # Email configuration -- used to deliver password-reset OTP codes (see
-# accounts.email) and, in DEBUG, defaults to Ethereal's fake SMTP catch-all
-# so nothing is ever really delivered from a dev machine. Production must
-# set real EMAIL_HOST_USER/EMAIL_HOST_PASSWORD/DEFAULT_FROM_EMAIL (and
-# EMAIL_HOST/EMAIL_PORT if not using Gmail-style TLS SMTP) via the
-# environment -- see .env.template.
-if DEBUG:
+# accounts.email) and claim-invite emails (institutes_list.tasks).
+# dev → Ethereal only; no real emails sent.
+# prod → Real SMTP only; no Ethereal.
+# dual → Ethereal + real SMTP for non-test domains.
+# Default → dev when DEBUG=True, otherwise prod.
+# prod/dual → Require all real SMTP settings; missing values cause startup failure.
+EMAIL_MODE = os.getenv("EMAIL_MODE", "dev" if DEBUG else "prod").lower()
+
+FAKE_EMAIL_DOMAINS = {
+    d.strip().lower()
+    for d in os.getenv(
+        "FAKE_EMAIL_DOMAINS", "test.com,example.com,example.net,example.org,test,invalid,localhost"
+    ).split(",")
+    if d.strip()
+}
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ImproperlyConfigured(f"{name} must be set (non-empty) when EMAIL_MODE={EMAIL_MODE!r}.")
+    return value
+
+
+# Ethereal (sandbox) connection -- used by "dev" and "dual". Host/port/TLS
+# default to Ethereal's own public SMTP endpoint so only the per-inbox
+# ETHEREAL_HOST_USER/PASSWORD (from https://ethereal.email) need setting.
+ETHEREAL_HOST = os.getenv("ETHEREAL_HOST", "smtp.ethereal.email")
+ETHEREAL_PORT = int(os.getenv("ETHEREAL_PORT", "587"))
+ETHEREAL_USE_TLS = os.getenv("ETHEREAL_USE_TLS", "true").lower() == "true"
+ETHEREAL_USE_SSL = os.getenv("ETHEREAL_USE_SSL", "false").lower() == "true"
+
+if EMAIL_MODE == "dev":
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-    EMAIL_HOST = os.getenv("EMAIL_HOST", "smtp.ethereal.email")
-    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-    EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
-    EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
-    EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-    EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+    EMAIL_HOST = ETHEREAL_HOST
+    EMAIL_PORT = ETHEREAL_PORT
+    EMAIL_USE_TLS = ETHEREAL_USE_TLS
+    EMAIL_USE_SSL = ETHEREAL_USE_SSL
+    EMAIL_HOST_USER = os.getenv("ETHEREAL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.getenv("ETHEREAL_HOST_PASSWORD", "")
     DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "test@example.com")
-else:
+elif EMAIL_MODE == "prod":
     EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-    EMAIL_HOST = os.environ["EMAIL_HOST"]
+    EMAIL_HOST = _require_env("EMAIL_HOST")
     EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
     EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
     EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
-    EMAIL_HOST_USER = os.environ["EMAIL_HOST_USER"]
-    EMAIL_HOST_PASSWORD = os.environ["EMAIL_HOST_PASSWORD"]
-    DEFAULT_FROM_EMAIL = os.environ["DEFAULT_FROM_EMAIL"]
+    EMAIL_HOST_USER = _require_env("EMAIL_HOST_USER")
+    EMAIL_HOST_PASSWORD = _require_env("EMAIL_HOST_PASSWORD")
+    DEFAULT_FROM_EMAIL = _require_env("DEFAULT_FROM_EMAIL")
+elif EMAIL_MODE == "dual":
+    EMAIL_BACKEND = "korgut_backend.email_backends.DualSendEmailBackend"
+    EMAIL_HOST = _require_env("EMAIL_HOST")
+    EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+    EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+    EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
+    EMAIL_HOST_USER = _require_env("EMAIL_HOST_USER")
+    EMAIL_HOST_PASSWORD = _require_env("EMAIL_HOST_PASSWORD")
+    DEFAULT_FROM_EMAIL = _require_env("DEFAULT_FROM_EMAIL")
+    ETHEREAL_HOST_USER = _require_env("ETHEREAL_HOST_USER")
+    ETHEREAL_HOST_PASSWORD = _require_env("ETHEREAL_HOST_PASSWORD")
+else:
+    raise ImproperlyConfigured(f"Unknown EMAIL_MODE={EMAIL_MODE!r}; expected 'dev', 'prod', or 'dual'.")
 
 # Who gets emailed when the student agent starts failing (e.g. Anthropic
 # credit exhaustion) and again once it recovers -- see
