@@ -15,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.github_oauth import GitHubNotConnectedError
+from accounts.models import Account
 from accounts.permissions import (
     IsStudentOrUniversityRole,
     IsStudentRole,
@@ -63,6 +64,7 @@ from django_api.services import (
     upload_profile_image,
     ProfileValidationError,
 )
+from institutes_list.models import ListedStudent
 
 logger = logging.getLogger(__name__)
 
@@ -1511,6 +1513,12 @@ class UniversityProfilesListView(APIView):
       min_score=<0-100>            Override the university's saved threshold for this request only.
       include_all_interested=true  Show every interested student regardless of score (same as min_score=0).
       priority_tier=high,medium     Comma-separated subset of high/medium/low/unranked to show.
+
+    Each profile also carries account-derived fields where available:
+    student_email/is_active/date_joined (from the student's auth.User via
+    accounts.Account) and institute_name. Any field
+    with no value is omitted entirely rather than sent as null, so the
+    frontend can auto-map whatever happens to be present.
     """
 
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
@@ -1552,18 +1560,30 @@ class UniversityProfilesListView(APIView):
             data = load_profile_data(row.student_id)
             assessment = entry["assessment"]
 
-            profiles.append({
+            account = Account.objects.filter(student_id=row.student_id).select_related("user").first()
+            listed_student = (
+                ListedStudent.objects.filter(claimed_student_id=row.student_id, status=ListedStudent.Status.CLAIMED)
+                .select_related("source_list__institute")
+                .order_by("-claimed_at")
+                .first()
+            )
+
+            profile = {
                 "profile_id": data.get("student_id"),
                 "name": data.get("name"),
+                "student_email": (account.user.email if account else None) or data.get("email") or None,
+                "institute_name": listed_student.source_list.institute.name if listed_student else None,
+                "is_active": account.user.is_active if account else None,
+                "date_joined": account.user.date_joined if account else None,
                 "profile_image_url": (
                     request.build_absolute_uri(f"/api/profile/{row.student_id}/image/")
                     if row.profile_image_path
                     else None
                 ),
-                "institution": data.get("institution"),
-                "major": data.get("major"),
+                "institution": data.get("institution") or None,
+                "major": data.get("major") or None,
                 "gpa": data.get("gpa"),
-                "gpa_scale": data.get("gpa_scale"),
+                "gpa_scale": data.get("gpa_scale") or None,
                 "gre_quant": data.get("gre_quant"),
                 "toefl": data.get("toefl"),
                 "budget": data.get("budget"),
@@ -1591,7 +1611,9 @@ class UniversityProfilesListView(APIView):
                 "priority_tier": entry["priority_tier"],
                 "fit_summary": assessment.get("fit_summary", data.get("summary", "")),
                 "recommendation": assessment.get("recommendation", "review"),
-            })
+            }
+
+            profiles.append({key: value for key, value in profile.items() if value is not None})
 
         return Response({
             "university_id": university_id,
