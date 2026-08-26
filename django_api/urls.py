@@ -66,6 +66,11 @@ urlpatterns = [
     # University Dashboard APIs
     path("university/<str:university_id>/profiles/", views.UniversityProfilesListView.as_view(), name="university-profiles"),
     path(
+        "university/<str:university_id>/profile/<str:student_id>/",
+        views.UniversityProfileDetailAPIView.as_view(),
+        name="university-profile-detail",
+    ),
+    path(
         "university/<str:university_id>/profile/<str:student_id>/chat/",
         views.university_profile_presenter_chat,
         name="university-profile-chat",

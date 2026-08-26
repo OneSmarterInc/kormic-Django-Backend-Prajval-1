@@ -46,6 +46,7 @@ from django_api.serializers import (
 from django_api.services import (
     CHAT_ATTACHMENT_MAX_PER_MESSAGE,
     build_image_content_blocks,
+    compute_priority_tier,
     create_or_update_profile,
     delete_profile_image,
     format_profile_response,
@@ -1519,6 +1520,13 @@ class UniversityProfilesListView(APIView):
     accounts.Account) and institute_name. Any field
     with no value is omitted entirely rather than sent as null, so the
     frontend can auto-map whatever happens to be present.
+
+    Each row only carries the essentials needed to render a roster card
+    (identity, headline stats, match/priority). The full profile -- skills,
+    projects, intelligence breakdowns, etc. -- is fetched on demand via
+    GET /api/university/<university_id>/profile/<student_id>/ once an
+    officer clicks into a card, so this list stays cheap regardless of how
+    many students are shortlisted.
     """
 
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
@@ -1584,28 +1592,8 @@ class UniversityProfilesListView(APIView):
                 "major": data.get("major") or None,
                 "gpa": data.get("gpa"),
                 "gpa_scale": data.get("gpa_scale") or None,
-                "gre_quant": data.get("gre_quant"),
-                "toefl": data.get("toefl"),
-                "budget": data.get("budget"),
-                "work_months": data.get("work_months"),
-                "academic_intelligence": data.get("academic_intelligence", {}),
-                "technical_intelligence": data.get("technical_intelligence", {}),
-                "research_intelligence": data.get("research_intelligence", {}),
-                "behaviour_intelligence": data.get("behaviour_intelligence", {}),
                 "overall_profile_score": data.get("overall_profile_score"),
-                "overall_profile": data.get("overall_profile", {}),
                 "profile_completeness": data.get("profile_completeness"),
-                "strengths": data.get("strengths", []),
-                "weaknesses": data.get("weaknesses", []),
-                "recommendations": data.get("recommendations", []),
-                "ai_summary": data.get("ai_summary", ""),
-                "summary": data.get("summary", ""),
-                "skills": data.get("skills", []),
-                "technical_skills": data.get("technical_skills", []),
-                "projects": data.get("projects", []),
-                "research": data.get("research"),
-                "research_interests": data.get("research_interests", []),
-                "publications": data.get("publications", []),
                 "match_tier": assessment.get("match_tier", "unassessed"),
                 "match_score": assessment.get("match_score"),
                 "priority_tier": entry["priority_tier"],
@@ -1621,6 +1609,63 @@ class UniversityProfilesListView(APIView):
             "tier_counts": get_priority_tier_counts(university_id),
             "profiles": profiles,
         })
+
+
+class UniversityProfileDetailAPIView(APIView):
+    """
+    GET /api/university/<university_id>/profile/<student_id>/
+    Full profile for one student, for the officer dashboard's card
+    click-through view. Companion to UniversityProfilesListView, which only
+    returns per-student essentials for the roster list -- this is where the
+    rest (skills, projects, intelligence breakdowns, etc.) lives.
+
+    student_id is intentionally unrestricted here (any student in the
+    university's own dashboard may be inspected) -- only university_id is
+    scoped, via ScopedToOwnUniversityId in UNIVERSITY_OWNER_PERMISSIONS.
+    """
+
+    permission_classes = UNIVERSITY_OWNER_PERMISSIONS
+
+    def get(self, request, university_id: str, student_id: str):
+        try:
+            profile = get_profile(student_id)
+        except FileNotFoundError as exc:
+            return api_error(str(exc), status.HTTP_404_NOT_FOUND)
+
+        row = StudentProfile.objects.filter(student_id=student_id).first()
+        profile["profile_image_url"] = (
+            request.build_absolute_uri(f"/api/profile/{student_id}/image/")
+            if row and row.profile_image_path
+            else None
+        )
+
+        response_data = format_profile_response(profile)
+
+        account = Account.objects.filter(student_id=student_id).select_related("user").first()
+        listed_student = (
+            ListedStudent.objects.filter(claimed_student_id=student_id, status=ListedStudent.Status.CLAIMED)
+            .select_related("source_list__institute")
+            .order_by("-claimed_at")
+            .first()
+        )
+        assessment = (profile.get("assessments") or {}).get(university_id, {}) or {}
+        match_score = assessment.get("match_score")
+
+        response_data["student_email"] = (account.user.email if account else None) or profile.get("email")
+        response_data["is_active"] = account.user.is_active if account else None
+        response_data["date_joined"] = account.user.date_joined if account else None
+        response_data["institute_name"] = listed_student.source_list.institute.name if listed_student else None
+        response_data["match_tier"] = assessment.get("match_tier", "unassessed")
+        response_data["match_score"] = match_score
+        response_data["priority_tier"] = (
+            compute_priority_tier(match_score, get_priority_tier_bounds(university_id))
+            if match_score is not None
+            else "unranked"
+        )
+        response_data["fit_summary"] = assessment.get("fit_summary", profile.get("summary", ""))
+        response_data["recommendation"] = assessment.get("recommendation", "review")
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
 
 @api_view(["POST"])
