@@ -125,6 +125,51 @@ class KnowledgeGroupAPITests(TestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
+    def _seed_two_group_escalations(self):
+        self.client.get("/api/university-admin/knowledge-groups/")
+        university = University.objects.get(id="write_state_api")
+        money = university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
+        admissions = university.knowledge_groups.get(slug=KnowledgeGroup.Slug.ADMISSIONS)
+
+        PendingQuery.objects.create(
+            university_id=university.id,
+            question="Is the stipend taxed?",
+            group=money,
+            student_name="Ada Lovelace",
+            student_id="stu-1",
+            agent_name="wsu-agent",
+            escalation_chain=["wsu-agent", "money"],
+        )
+        PendingQuery.objects.create(
+            university_id=university.id, question="deadline?", group=admissions
+        )
+        return university, money
+
+    def test_escalations_list_endpoint_returns_only_this_groups_escalations(self):
+        self._seed_two_group_escalations()
+
+        resp = self.client.get("/api/university-admin/knowledge-groups/money/escalations_list/")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(resp.data.keys()), {"group", "escalations"})
+        self.assertEqual(resp.data["group"]["escalation_count"], 1)
+        # Only the escalation routed to "money" comes back, not the admissions one.
+        self.assertEqual(len(resp.data["escalations"]), 1)
+        escalation = resp.data["escalations"][0]
+        self.assertEqual(escalation["question"], "Is the stipend taxed?")
+        self.assertEqual(escalation["student_name"], "Ada Lovelace")
+        self.assertEqual(escalation["agent_name"], "wsu-agent")
+        self.assertEqual(escalation["group"], "money")
+
+    def test_knowledge_list_endpoint_has_no_escalations_key(self):
+        university, _money = self._seed_two_group_escalations()
+
+        resp = self.client.get("/api/university-admin/knowledge-groups/money/knowledge_list/")
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(set(resp.data.keys()), {"group", "knowledge"})
+        self.assertNotIn("escalations", resp.data)
+
 
 class ManualKnowledgeFactGroupTaggingTests(TestCase):
     def setUp(self):

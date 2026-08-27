@@ -1,6 +1,7 @@
 import json
 from unittest import mock
 
+from django.core import mail
 from django.test import TestCase
 
 from agents import identity_registry
@@ -234,6 +235,12 @@ class UniversityAgentEscalationRoutingTests(TestCase):
         self.assertEqual(query.routed_to_email, "bursar@wsu.edu")
         self.assertEqual(result["pending_query"]["group"], "money")
 
+        # The group's contact is emailed automatically as the escalation lands.
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["bursar@wsu.edu"])
+        self.assertIn("routed to Money", mail.outbox[0].subject)
+        self.assertIn("What is the assistantship stipend?", mail.outbox[0].body)
+
     @mock.patch("agents.university_agent._get_anthropic_client")
     def test_escalation_still_created_when_no_groups_configured(self, mock_client):
         University.objects.create(id="no_groups_u", name="No Groups University", agent_name="Nova6")
@@ -250,6 +257,8 @@ class UniversityAgentEscalationRoutingTests(TestCase):
         query = PendingQuery.objects.get(id=result["pending_query"]["query_id"])
         self.assertIsNone(query.group)
         self.assertEqual(query.routed_to_email, "")
+        # No group -> nobody to notify.
+        self.assertEqual(len(mail.outbox), 0)
 
 
 class AgentIdentityAndConversationLogTests(TestCase):

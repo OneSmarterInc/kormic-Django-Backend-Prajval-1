@@ -50,7 +50,7 @@ class ClusterApprovalTests(TestCase):
         self.assertIsNone(fees_cluster["approved"])
 
     @mock.patch("knowledge.scraper.scrape_university")
-    def test_approving_a_cluster_records_provenance_applies_urls_and_tags_group(self, mock_scrape):
+    def test_approving_a_cluster_records_provenance_and_applies_urls(self, mock_scrape):
         mock_scrape.return_value = 1
 
         resp = self.client.post(
@@ -64,15 +64,19 @@ class ClusterApprovalTests(TestCase):
         self.assertIsNotNone(approval.approved_at)
         self.assertEqual(approval.url_count, 1)
 
+        # The category->group mapping is still recorded on the approval as
+        # review metadata for the department map...
         money_group = KnowledgeGroup.objects.get(university=self.university, slug="money")
         self.assertEqual(approval.knowledge_group_id, money_group.id)
 
         self.university.refresh_from_db()
         self.assertIn("https://cluster-state.edu/tuition/fees", self.university.scrape_urls)
 
+        # ...but the scraped facts themselves are NOT tagged into that group:
+        # knowledge groups collect escalations, not auto-scraped knowledge.
         mock_scrape.assert_called_once()
         _args, kwargs = mock_scrape.call_args
-        self.assertEqual(kwargs.get("group_id"), money_group.id)
+        self.assertIsNone(kwargs.get("group_id"))
 
     @mock.patch("knowledge.scraper.scrape_university")
     def test_reapproving_a_cluster_refreshes_provenance_instead_of_duplicating(self, mock_scrape):

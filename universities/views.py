@@ -845,11 +845,18 @@ class KnowledgeGroupDetailAPIView(APIView):
 
 class KnowledgeGroupFactsAPIView(APIView):
     """
-    GET /api/university-admin/knowledge-groups/<slug>/knowledge/
+    GET /api/university-admin/knowledge-groups/<slug>/knowledge_list/
     Knowledge facts tagged with one group -- backs a "view list" action per
     group on the officer dashboard. Equivalent to
     GET /knowledge/?group=<slug> but also returns the group's own record
     (contact info, escalation_count) alongside its facts in one call.
+
+    Only manually-added facts are ever tagged to a group (see
+    add_manual_knowledge_fact / KnowledgeFactDetailAPIView) -- auto-scrape
+    and URL discovery do not route facts here. No email is sent for this
+    endpoint; escalation routing and its notification live on the sibling
+    .../escalations_list/ endpoint.
+
     Lazily creates the 4 default groups first, same as the group list GET,
     so this works even if the frontend hasn't called that endpoint yet.
     """
@@ -907,9 +914,15 @@ def _resolve_group_or_error(request, slug: str):
 
 class KnowledgeGroupEscalationsAPIView(APIView):
     """
-    GET /api/university-admin/knowledge-groups/<slug>/escalations/
+    GET /api/university-admin/knowledge-groups/<slug>/escalations_list/
     The actual list behind a group's "escalation_count" -- every escalated
-    student question (PendingQuery) routed to this group, newest first.
+    student question (PendingQuery) routed to this group, newest first,
+    plus the group's own record. This is the group's real payload: a
+    knowledge group exists to collect escalations and route them to a named
+    contact (who is emailed automatically the moment an escalation lands
+    here -- see universities.notifications.send_escalation_routed_alert).
+    Group-tagged knowledge facts are a separate concern, served by the
+    sibling .../knowledge_list/ endpoint.
     """
 
     permission_classes = UNIVERSITY_ADMIN_PERMISSIONS
@@ -936,10 +949,12 @@ class KnowledgeGroupEscalationsAPIView(APIView):
 
 class KnowledgeGroupEscalationNotifyAPIView(APIView):
     """
-    POST /api/university-admin/knowledge-groups/<slug>/escalations/notify/
+    POST /api/university-admin/knowledge-groups/<slug>/escalations_list/notify/
         Body (optional): {"escalation_ids": [1, 2], "message": "..."}
-    Emails the group's escalation contact about escalations routed to it --
-    the "send mail to the routed group" action. Defaults to every
+    Manual re-send of the group's escalation digest. Escalations are already
+    emailed to the contact automatically as they arrive (see
+    send_escalation_routed_alert); this is the officer-triggered "email them
+    again / email this selection with a note" action. Defaults to every
     still-pending escalation for the group; pass escalation_ids to scope the
     email to a specific selection instead (ids outside this group/university
     are silently ignored, not errored, so a stale id in a batch doesn't fail

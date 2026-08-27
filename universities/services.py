@@ -236,9 +236,13 @@ def scrape_now(university: University) -> Dict[str, Any]:
 
 def scrape_selected_urls(university: University, urls: List[str], group_id: Optional[int] = None) -> Dict[str, Any]:
     """Same one-URL-at-a-time loop as scrape_now(), but for an explicit URL
-    subset instead of every saved scrape_url, and threading group_id (B2) so
-    facts scraped from an approved url_discovery cluster get tagged with the
-    department they were approved for.
+    subset instead of every saved scrape_url.
+
+    group_id is retained only as a low-level passthrough to scrape_university;
+    no caller sets it anymore. Auto-scraped facts (including approve_cluster's
+    path) are deliberately left ungrouped -- a knowledge group collects
+    escalations, not scraped knowledge, and only a manual fact add routes
+    into one.
 
     Same already-scraped skip as scrape_now() -- this is also the path
     approve_cluster() calls, so re-approving a cluster (or a cluster whose

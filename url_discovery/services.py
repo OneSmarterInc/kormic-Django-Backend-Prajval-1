@@ -297,10 +297,15 @@ def proposed_department_map(job: DiscoveryJob) -> List[Dict[str, Any]]:
 
 def approve_cluster(job: DiscoveryJob, category: str, approved_by: str) -> Dict[str, Any]:
     """Approve one category cluster: apply its URLs to
-    University.scrape_urls, scrape just those URLs tagging the resulting
-    facts with the mapped KnowledgeGroup, and record who/when as
-    provenance. Re-approving the same cluster updates the existing row
-    (fresh provenance, not a duplicate)."""
+    University.scrape_urls, scrape just those URLs, and record who/when
+    (plus the category's mapped KnowledgeGroup, for the officer-facing
+    department map) as provenance. Re-approving the same cluster updates
+    the existing row (fresh provenance, not a duplicate).
+
+    The scraped facts themselves are NOT tagged with the mapped group: a
+    knowledge group collects escalations, not auto-scraped knowledge. Only
+    a manual fact add routes into a group. The category->group mapping is
+    kept purely as review metadata on the approval / department map."""
     from universities.knowledge_groups import ensure_default_groups
     from universities.models import KnowledgeGroup
     from universities.services import scrape_selected_urls
@@ -335,9 +340,9 @@ def approve_cluster(job: DiscoveryJob, category: str, approved_by: str) -> Dict[
         },
     )
 
-    scrape_result = scrape_selected_urls(
-        university, urls, group_id=knowledge_group.id if knowledge_group else None
-    )
+    # Intentionally no group_id: auto-scraped facts are never routed into a
+    # knowledge group (that's escalation-only) -- see docstring.
+    scrape_result = scrape_selected_urls(university, urls)
 
     return {
         "approval": serialize_cluster_approval(approval),

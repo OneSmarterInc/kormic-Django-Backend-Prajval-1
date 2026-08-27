@@ -567,6 +567,14 @@ STUDENT CONTEXT:
             confidence=confidence,
         )
 
+        # A1: notify the group's contact the moment the escalation lands in
+        # their group. Best-effort -- send_escalation_routed_alert never
+        # raises, and no-ops when the group has no contact email.
+        if group is not None:
+            from universities.notifications import send_escalation_routed_alert
+
+            send_escalation_routed_alert(query=query, group=group)
+
         return self._serialize_pending_query(query)
 
     def show_pending_queries(self) -> None:

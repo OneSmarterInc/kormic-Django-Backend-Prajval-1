@@ -79,17 +79,17 @@ urlpatterns = [
         name="university-admin-knowledge-group-detail",
     ),
     path(
-        "knowledge-groups/<str:slug>/knowledge/",
+        "knowledge-groups/<str:slug>/knowledge_list/",
         views.KnowledgeGroupFactsAPIView.as_view(),
-        name="university-admin-knowledge-group-facts",
+        name="university-admin-knowledge-group-knowledge-list",
     ),
     path(
-        "knowledge-groups/<str:slug>/escalations/",
+        "knowledge-groups/<str:slug>/escalations_list/",
         views.KnowledgeGroupEscalationsAPIView.as_view(),
-        name="university-admin-knowledge-group-escalations",
+        name="university-admin-knowledge-group-escalations-list",
     ),
     path(
-        "knowledge-groups/<str:slug>/escalations/notify/",
+        "knowledge-groups/<str:slug>/escalations_list/notify/",
         views.KnowledgeGroupEscalationNotifyAPIView.as_view(),
         name="university-admin-knowledge-group-escalations-notify",
     ),
