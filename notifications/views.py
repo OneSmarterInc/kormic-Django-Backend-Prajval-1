@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timezone as dt_timezone
+
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import status
@@ -9,6 +11,11 @@ from rest_framework.views import APIView
 
 from accounts.permissions import IsTOTPEnrolled, get_account
 from notifications.models import NotificationLog, PushToken
+
+#  keep the page small so one poll can't pull a large backlog (and a large `data`
+# blob per row) in a single response.
+POLL_LATEST_LIMIT_DEFAULT = 5
+POLL_LATEST_LIMIT_MAX = 20
 
 
 class RegisterPushTokenView(APIView):
@@ -79,6 +86,11 @@ class PollNotificationsView(APIView):
     `since`. Pass the `server_time` from this response as `since` on the
     next poll (safer than the last item's `created_at`, which can tie with
     another row created in the same instant).
+
+    This is a lightweight "what did I miss" check, not a history feed:
+    `limit` defaults to POLL_LATEST_LIMIT_DEFAULT (5) and is hard-capped at
+    POLL_LATEST_LIMIT_MAX (20) so a poll can never pull a large backlog in
+    one call.
     """
 
     permission_classes = [IsAuthenticated, IsTOTPEnrolled]
@@ -98,13 +110,16 @@ class PollNotificationsView(APIView):
                     {"error": "Invalid 'since' timestamp; use ISO 8601."}, status=status.HTTP_400_BAD_REQUEST
                 )
             if timezone.is_naive(since_dt):
-                since_dt = timezone.make_aware(since_dt, timezone.utc)
+                since_dt = timezone.make_aware(since_dt, dt_timezone.utc)
             qs = qs.filter(created_at__gt=since_dt)
 
         try:
-            limit = min(max(int(request.query_params.get("limit", 20)), 1), 50)
-        except ValueError:
-            limit = 20
+            limit = min(
+                max(int(request.query_params.get("limit", POLL_LATEST_LIMIT_DEFAULT)), 1),
+                POLL_LATEST_LIMIT_MAX,
+            )
+        except (TypeError, ValueError):
+            limit = POLL_LATEST_LIMIT_DEFAULT
 
         logs = list(qs.order_by("-created_at")[:limit])
 

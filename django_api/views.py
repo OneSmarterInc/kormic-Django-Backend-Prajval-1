@@ -73,6 +73,23 @@ STUDENT_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole]
 STUDENT_OWNER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsStudentRole, ScopedToOwnStudentId]
 UNIVERSITY_OWNER_PERMISSIONS = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole, ScopedToOwnUniversityId]
 
+# Chat-history endpoints return a bounded window of the most recent turns
+# (still in chronological order) instead of the entire transcript -- a long
+# conversation would otherwise grow the response without limit. A caller can
+# pass ?limit= for a smaller window; the cap protects the server regardless.
+CHAT_HISTORY_LIMIT_DEFAULT = 200
+CHAT_HISTORY_LIMIT_MAX = 500
+
+
+def chat_history_limit(request) -> int:
+    raw = request.query_params.get("limit")
+    if raw is None:
+        return CHAT_HISTORY_LIMIT_DEFAULT
+    try:
+        return min(max(int(raw), 1), CHAT_HISTORY_LIMIT_MAX)
+    except (TypeError, ValueError):
+        return CHAT_HISTORY_LIMIT_DEFAULT
+
 
 def log_chat_turn(
     *, channel, student_id, university_id="", user_message="", assistant_message="", meta=None, user_meta=None
@@ -996,15 +1013,18 @@ class ChatAttachmentDetailAPIView(APIView):
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat_history(request):
     student_id = request.user.account.student_id
-    messages = ChatMessage.objects.filter(
-        channel=ChatMessage.Channel.AGENT, student_id=student_id
-    ).prefetch_related("attachments")
+    limit = chat_history_limit(request)
+    base_qs = ChatMessage.objects.filter(channel=ChatMessage.Channel.AGENT, student_id=student_id)
+    total = base_qs.count()
+    # Take the most recent `limit` turns, then flip back to chronological
+    # order for the client.
+    messages = base_qs.prefetch_related("attachments").order_by("-created_at")[:limit]
     # Escalation state, computed at read time: collect every query_id any
     # message's meta references, fetch their current status in one query, and
     # annotate. A message tagged escalation_pending whose query has since been
     # answered will therefore read status "resolved" -- the app can flip the
     # old "checking..." bubble without waiting for a new message.
-    _msgs = list(messages)
+    _msgs = list(messages)[::-1]
     _qids = {
         m.meta.get("query_id")
         for m in _msgs
@@ -1023,6 +1043,8 @@ def agent_chat_history(request):
 
     return Response({
         "count": len(_msgs),
+        "total": total,
+        "truncated": total > len(_msgs),
         "messages": [
             {
                 "id": m.id,
@@ -1167,8 +1189,11 @@ class RoadmapView(APIView):
             if isinstance(roadmap, dict):
                 profile["roadmap"] = roadmap
                 save_profile_data(student_id, profile)
+                # The profile JSON can exist before a StudentProfile row does
+                # -- don't 500 on the history write in that case.
+                student_row, _ = StudentProfile.objects.get_or_create(student_id=student_id)
                 RoadmapVersion.objects.create(
-                    student=StudentProfile.objects.get(student_id=student_id),
+                    student=student_row,
                     request_message=user_message,
                     roadmap=roadmap,
                 )
@@ -1328,7 +1353,7 @@ class AnswerPendingQueryView(APIView):
 
         try:
             query_id_int = int(query_id)
-        except ValueError:
+        except (TypeError, ValueError):
             return Response({"status": "failed", "message": "query_id must be a number"}, status=status.HTTP_400_BAD_REQUEST)
 
         selected_query = PendingQuery.objects.filter(id=query_id_int).first()
@@ -1451,7 +1476,13 @@ class ExportProfilePDFView(APIView):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            return FileResponse(open(pdf_path, "rb"), as_attachment=True, filename=pdf_path.name, content_type="application/pdf")
+            # Read fully into memory rather than handing FileResponse an open
+            # file handle -- matches every other download view here and keeps
+            # the handle short-lived (an open handle blocks unlink on Windows).
+            content = pdf_path.read_bytes()
+            return FileResponse(
+                io.BytesIO(content), as_attachment=True, filename=pdf_path.name, content_type="application/pdf"
+            )
         except Exception as exc:
             return Response(
                 {"status": "failed", "message": "PDF export failed.", "error": str(exc)},
@@ -1723,11 +1754,16 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
 @api_view(["GET"])
 @permission_classes(UNIVERSITY_OWNER_PERMISSIONS)
 def university_profile_presenter_chat_history(request, university_id: str, student_id: str):
-    messages = ChatMessage.objects.filter(
+    limit = chat_history_limit(request)
+    base_qs = ChatMessage.objects.filter(
         channel=ChatMessage.Channel.PRESENTER, student_id=student_id, university_id=university_id
     )
+    total = base_qs.count()
+    messages = list(base_qs.order_by("-created_at")[:limit])[::-1]
     return Response({
-        "count": messages.count(),
+        "count": len(messages),
+        "total": total,
+        "truncated": total > len(messages),
         "messages": [
             {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
             for m in messages
@@ -1803,9 +1839,14 @@ def university_agent_chat_history(request, university_id: str):
         ).delete()
         return Response({"status": "ok", "university_id": university_id, "messages_deleted": deleted_count})
 
-    messages = ChatMessage.objects.filter(channel=ChatMessage.Channel.UNIVERSITY, university_id=university_id)
+    limit = chat_history_limit(request)
+    base_qs = ChatMessage.objects.filter(channel=ChatMessage.Channel.UNIVERSITY, university_id=university_id)
+    total = base_qs.count()
+    messages = list(base_qs.order_by("-created_at")[:limit])[::-1]
     return Response({
-        "count": messages.count(),
+        "count": len(messages),
+        "total": total,
+        "truncated": total > len(messages),
         "messages": [
             {"sender": m.sender, "content": m.content, "created_at": m.created_at, "meta": m.meta}
             for m in messages

@@ -256,6 +256,7 @@ def list_lists(request):
     lists = []
     for lst in qs:
         counts = status_counts_by_list.get(lst.id, {"claimed": 0})
+        claimed_count = counts.get("claimed", 0)
         lists.append(
             {
                 "list_id": lst.id,
@@ -265,8 +266,11 @@ def list_lists(request):
                 "contact_email": lst.contact_email,
                 "status": lst.status,
                 "row_count": lst.row_count,
-                "claimed_count": counts.get("claimed", 0),
-                "unclaimed_count": lst.row_count - counts.get("claimed", 0),
+                "claimed_count": claimed_count,
+                # row_count is the last upload's accepted-row count while
+                # claimed_count is all-time; clamp so a re-upload can't yield
+                # a negative "unclaimed" here.
+                "unclaimed_count": max(0, lst.row_count - claimed_count),
                 "created_at": lst.created_at,
             }
         )

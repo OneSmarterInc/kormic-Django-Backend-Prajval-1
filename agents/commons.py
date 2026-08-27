@@ -297,7 +297,9 @@ def _assessment_failed(assessment: Any) -> bool:
         return True
     if assessment.get("match_tier") == "unknown":
         return True
-    if int(assessment.get("match_score") or 0) <= 0:
+    # match_score may arrive as a non-integer string ("75", "75.5") from the
+    # model -- coerce defensively rather than letting int() raise.
+    if _safe_number(assessment.get("match_score"), 0) <= 0:
         return True
     return False
 
@@ -341,8 +343,11 @@ def generate_fit_assessment(student_id: str, university_id: str, force: bool = F
     profile["assessments"][university_id] = assessment
     save_profile_data(student_id, profile)
 
+    # A fit assessment can be requested before the student has a saved
+    # StudentProfile row -- create one rather than 500 on .get().
+    student_row, _ = StudentProfile.objects.get_or_create(student_id=student_key)
     row = FitAssessment.objects.create(
-        student=StudentProfile.objects.get(student_id=student_key),
+        student=student_row,
         university_id=university_id,
         assessment=assessment,
     )
