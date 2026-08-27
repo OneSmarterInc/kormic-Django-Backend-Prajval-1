@@ -19,7 +19,7 @@ def generate_totp_secret() -> str:
 
 
 def build_provisioning_uri(secret: str, user_email: str) -> str:
-    return pyotp.totp.TOTP(secret).provisioning_uri(name=user_email, issuer_name="Korgut Commons")
+    return pyotp.totp.TOTP(secret).provisioning_uri(name=user_email, issuer_name="Kormic Commons")
 
 
 def normalize_code(raw: str) -> str:

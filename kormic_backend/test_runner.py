@@ -1,4 +1,4 @@
-# korgut_backend/test_runner.py
+# kormic_backend/test_runner.py
 # pure_multi_agent.runtime opens its own psycopg connection pool to the
 # same database Django's ORM uses (see runtime.py's _build_checkpointer),
 # separate from django.db.connections because it's a different driver

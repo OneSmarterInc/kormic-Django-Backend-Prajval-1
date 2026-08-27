@@ -1,5 +1,5 @@
 # agents/github_agent.py
-# GitHub Skills Agent for the Korgut Commons.
+# GitHub Skills Agent for the Kormic Commons.
 # Reads a student's public GitHub profile and evaluates demonstrated skills.
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class GitHubSkillsAgent:
 
         self.headers = {
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": "Korgut-GitHub-Skills-Agent",
+            "User-Agent": "Kormic-GitHub-Skills-Agent",
         }
 
         if token:
@@ -556,7 +556,7 @@ class GitHubSkillsAgent:
     def _assess(self, raw_data: dict) -> dict:
         """Use Claude to produce a structured skills assessment, with a rule fallback."""
         prompt = f"""
-You are a technical skills evaluator for Korgut, a graduate admissions platform.
+You are a technical skills evaluator for Kormic, a graduate admissions platform.
 Evaluate this student's GitHub profile and produce an honest skills assessment.
 
 Return ONLY valid JSON. No markdown. No explanation.

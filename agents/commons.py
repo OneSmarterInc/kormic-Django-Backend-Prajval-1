@@ -1,5 +1,5 @@
 # agents/commons.py
-# The Korgut Commons — where agents live and communicate.
+# The Kormic Commons — where agents live and communicate.
 #
 # This is the single orchestration layer every backend agent (university
 # agents, verification, fit assessment) is reached through. The student
@@ -125,7 +125,7 @@ def get_university_agent(university_id: str, auto_scrape: Optional[bool] = None)
         raise ValueError(f"Unknown university_id: {university_id}")
 
     if auto_scrape is None:
-        auto_scrape = os.getenv("KORGUT_AUTO_SCRAPE", "false").lower() == "true"
+        auto_scrape = os.getenv("KORMIC_AUTO_SCRAPE", "false").lower() == "true"
 
     agent = UniversityAgent(university_id, auto_scrape=auto_scrape)
     register(university_id, agent)
@@ -381,13 +381,13 @@ def record_university_interest(student_id: str, university_id: str, source: str)
 # ---------------------------------------------------------------------
 
 def status() -> str:
-    """Show the current state of the Korgut Commons."""
+    """Show the current state of the Kormic Commons."""
     if not _university_agents:
-        return "The Korgut Commons is empty — no agents registered yet."
+        return "The Kormic Commons is empty — no agents registered yet."
 
     lines = [
         f"\n{'=' * 60}",
-        "  THE KORGUT COMMONS",
+        "  THE KORMIC COMMONS",
         f"  {len(_university_agents)} university agent(s) active",
         f"{'=' * 60}",
     ]

@@ -37,7 +37,7 @@ x-app: &app
 services:
   redis:
     image: redis:7-alpine
-    container_name: korgut_redis
+    container_name: kormic_redis
     volumes:
       - redis_data:/data
     healthcheck:
@@ -70,7 +70,7 @@ services:
   # always up to date.
   migrate:
     build: .
-    container_name: korgut_migrate
+    container_name: kormic_migrate
     command: python manage.py migrate --noinput
     volumes:
       - .:/app
@@ -88,7 +88,7 @@ services:
 
   web:
     <<: *app
-    container_name: korgut_web
+    container_name: kormic_web
     # gunicorn, not manage.py runserver -- runserver is single-threaded-ish,
     # unstable under load, and explicitly documented by Django as unsafe for
     # production. GUNICORN_WORKERS/TIMEOUT are env-tunable (see
@@ -99,7 +99,7 @@ services:
     # nothing changed.
   
     # command: python manage.py runserver 0.0.0.0:8030
-    command: sh -c "python manage.py collectstatic --noinput && exec gunicorn korgut_backend.wsgi:application --bind 0.0.0.0:8030 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile - ${GUNICORN_EXTRA_ARGS:-}"
+    command: sh -c "python manage.py collectstatic --noinput && exec gunicorn kormic_backend.wsgi:application --bind 0.0.0.0:8030 --workers ${GUNICORN_WORKERS:-3} --timeout ${GUNICORN_TIMEOUT:-120} --access-logfile - --error-logfile - ${GUNICORN_EXTRA_ARGS:-}"
     ports:
       - "8030:8030"
     healthcheck:
@@ -111,10 +111,10 @@ services:
 
   celery_worker:
     <<: *app
-    container_name: korgut_celery_worker
-    command: celery -A korgut_backend worker -l info
+    container_name: kormic_celery_worker
+    command: celery -A kormic_backend worker -l info
     healthcheck:
-      test: ["CMD-SHELL", "celery -A korgut_backend inspect ping -d celery@$$HOSTNAME || exit 1"]
+      test: ["CMD-SHELL", "celery -A kormic_backend inspect ping -d celery@$$HOSTNAME || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -122,12 +122,12 @@ services:
 
   celery_beat:
     <<: *app
-    container_name: korgut_celery_beat
+    container_name: kormic_celery_beat
     # --schedule points the PersistentScheduler db at /home/app (owned by the
     # unprivileged `app` user, see Dockerfile) instead of the default relative
     # path in /app. /app is the .:/app bind mount and is root-owned on a Linux
     # host, so beat could not create its schedule file there and crash-looped.
-    command: celery -A korgut_backend beat -l info --schedule /home/app/celerybeat-schedule
+    command: celery -A kormic_backend beat -l info --schedule /home/app/celerybeat-schedule
 
 volumes:
   redis_data:

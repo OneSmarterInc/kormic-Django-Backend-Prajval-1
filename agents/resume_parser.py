@@ -1,5 +1,5 @@
 # agents/resume_parser.py
-# The Resume Parser Agent for the Korgut Commons.
+# The Resume Parser Agent for the Kormic Commons.
 # Reads a student resume (PDF or DOCX) and extracts a structured profile for Aria.
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ MODEL = "claude-haiku-4-5-20251001"
 
 
 EXTRACTION_PROMPT_TEMPLATE = """
-You are a resume parser for Korgut, a graduate admissions platform.
+You are a resume parser for Kormic, a graduate admissions platform.
 Extract structured information from this student resume.
 
 Today's date is {today}. Use this as "now" whenever the resume says
@@ -201,7 +201,7 @@ def read_text_file(file_path: str) -> str:
 
 
 class ResumeParserAgent:
-    """Parse PDF/DOCX/TXT resumes into the internal Korgut student profile schema."""
+    """Parse PDF/DOCX/TXT resumes into the internal Kormic student profile schema."""
 
     def parse(self, file_path: str) -> Dict[str, Any]:
         path = Path(file_path)
@@ -469,7 +469,7 @@ class ResumeParserAgent:
         }
 
     def _map(self, extracted: Dict[str, Any]) -> Dict[str, Any]:
-        """Map extraction output to Korgut's internal profile schema."""
+        """Map extraction output to Kormic's internal profile schema."""
         gaps = [str(gap) for gap in self._safe_list(extracted.get("gaps", []))]
 
         for required_gap in ["budget", "target_disciplines"]:

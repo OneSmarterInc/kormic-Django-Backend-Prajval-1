@@ -54,7 +54,7 @@ def send_escalation_routed_alert(*, query: "PendingQuery", group) -> bool:
         "",
         "Open the officer dashboard to review and answer it.",
         "",
-        f"-- {university_name} (via Korgut)",
+        f"-- {university_name} (via Kormic)",
     ]
     message = "\n".join(lines)
 
@@ -97,7 +97,7 @@ def send_escalation_digest_email(
             lines.append(f"  Submitted: {query.created_at:%Y-%m-%d %H:%M}")
         lines.append("")
 
-    lines.append(f"-- {university_name} (via Korgut)")
+    lines.append(f"-- {university_name} (via Kormic)")
     message = "\n".join(lines)
 
     try:

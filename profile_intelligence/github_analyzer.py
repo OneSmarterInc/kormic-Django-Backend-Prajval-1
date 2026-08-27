@@ -48,7 +48,7 @@ class GitHubAnalyzer:
     def _headers(self) -> Dict[str, str]:
         headers = {
             "Accept": "application/vnd.github+json",
-            "User-Agent": "Korgut-Profile-Analyzer"
+            "User-Agent": "Kormic-Profile-Analyzer"
         }
 
         if self.github_token:
@@ -106,7 +106,7 @@ class GitHubAnalyzer:
         try:
             response = requests.get(
                 f"https://raw.githubusercontent.com/{repo_full_name}/HEAD/README.md",
-                headers={"User-Agent": "Korgut-Profile-Analyzer"},
+                headers={"User-Agent": "Kormic-Profile-Analyzer"},
                 timeout=15
             )
 
@@ -116,7 +116,7 @@ class GitHubAnalyzer:
             # fallback for master branch
             response = requests.get(
                 f"https://raw.githubusercontent.com/{repo_full_name}/master/README.md",
-                headers={"User-Agent": "Korgut-Profile-Analyzer"},
+                headers={"User-Agent": "Kormic-Profile-Analyzer"},
                 timeout=15
             )
 
@@ -126,7 +126,7 @@ class GitHubAnalyzer:
             # fallback for main branch
             response = requests.get(
                 f"https://raw.githubusercontent.com/{repo_full_name}/main/README.md",
-                headers={"User-Agent": "Korgut-Profile-Analyzer"},
+                headers={"User-Agent": "Kormic-Profile-Analyzer"},
                 timeout=15
             )
 

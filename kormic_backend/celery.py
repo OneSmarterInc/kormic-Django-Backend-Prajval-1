@@ -3,9 +3,9 @@ import os
 from celery import Celery
 from celery.signals import task_postrun, task_prerun
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "korgut_backend.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "kormic_backend.settings")
 
-app = Celery("korgut_backend")
+app = Celery("kormic_backend")
 app.config_from_object("django.conf:settings", namespace="CELERY")
 app.autodiscover_tasks()
 

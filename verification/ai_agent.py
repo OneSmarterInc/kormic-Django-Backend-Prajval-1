@@ -16,7 +16,7 @@ MODEL = "claude-haiku-4-5-20251001"
 
 VALID_SEVERITIES = {"moderate", "high"}
 
-SYSTEM_PROMPT = """You are an integrity verification analyst for Korgut Commons, a graduate \
+SYSTEM_PROMPT = """You are an integrity verification analyst for Kormic Commons, a graduate \
 admissions platform. A student has declared a profile and may have uploaded a resume, connected \
 a GitHub account, and/or uploaded LinkedIn screenshots. Your job is to decide whether there is \
 genuine reason to question whether these sources are honest and consistent -- NOT to mechanically \

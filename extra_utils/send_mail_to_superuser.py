@@ -51,7 +51,7 @@ def notify_agent_error(error_text: str, *, student_id: Optional[str] = None) -> 
     if not recipients:
         return
 
-    subject = "[Korgut] Student agent is failing -- action needed"
+    subject = "[Kormic] Student agent is failing -- action needed"
     body = (
         "The student chat agent just failed to generate a response.\n\n"
         f"Time (UTC): {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S}\n"
@@ -80,7 +80,7 @@ def notify_agent_recovered() -> None:
     if not recipients:
         return
 
-    subject = "[Korgut] Student agent has recovered"
+    subject = "[Kormic] Student agent has recovered"
     body = (
         "The student chat agent is answering normally again as of "
         f"{datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC.\n\n"

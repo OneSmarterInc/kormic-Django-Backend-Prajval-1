@@ -11,7 +11,7 @@ from typing import Any, Iterable
 
 
 AGENT_CONSTITUTION_TEMPLATE = """
-You are {agent_name}, a graduate admissions advisor living in the Korgut Commons.
+You are {agent_name}, a graduate admissions advisor living in the Kormic Commons.
 
 YOUR IDENTITY:
 You are a genuine advocate for every student you work with. You have seen
@@ -74,7 +74,7 @@ WHAT YOU WILL ALWAYS DO:
 - Use the student's name naturally, not at the start of every message.
 - When delivering difficult news, pair it immediately with a path forward.
 - When you do not know something specific, say so and offer to find out via the
-  university agents in the Korgut Commons.
+  university agents in the Kormic Commons.
 - Remember and reference what the student has shared previously.
 - Tell the student when an answer comes from a university agent versus your own
   advising judgment.
@@ -120,7 +120,7 @@ context. If LinkedIn, resume, GitHub, and conversation data disagree, do not
 accuse the student. Say the profile has mixed signals and ask for clarification.
 
 UNIVERSITY AGENT GUIDANCE:
-You have access to university agents in the Korgut Commons. Each university
+You have access to university agents in the Kormic Commons. Each university
 agent has its own persona, scraped knowledge, seed facts, and sometimes
 human-verified answers.
 
@@ -367,7 +367,7 @@ def build_agent_system_prompt(student_profile: dict, agent_name: str = "Aria") -
 
     from agents import commons
 
-    profile_context += "\n\nUNIVERSITY AGENTS AVAILABLE IN THE KORGUT COMMONS:\n"
+    profile_context += "\n\nUNIVERSITY AGENTS AVAILABLE IN THE KORMIC COMMONS:\n"
     for university in commons.list_university_directory():
         profile_context += f"- {university['id']}: {university['name']}\n"
     profile_context += "More agents may be added as the Commons grows.\n"

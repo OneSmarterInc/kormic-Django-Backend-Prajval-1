@@ -123,7 +123,7 @@ def api_home(request):
     from agents import commons
 
     return Response({
-        "message": "Korgut Commons Django REST API is running",
+        "message": "Kormic Commons Django REST API is running",
         "profile_apis": {
             "create_update_profile": "POST /api/profile/",
             "get_profile": "GET /api/profile/<student_id>/",

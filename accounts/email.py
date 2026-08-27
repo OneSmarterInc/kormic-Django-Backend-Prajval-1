@@ -10,27 +10,27 @@ logger = logging.getLogger(__name__)
 
 
 def send_otp_email(user: User, otp: str, *, ttl_minutes: int) -> None:
-    subject = "Your Korgut Commons password reset code"
+    subject = "Your Kormic Commons password reset code"
     message = (
         "Hi,\n\n"
         f"Your one-time password reset code is: {otp}\n\n"
         f"This code expires in {ttl_minutes} minutes and can only be used once.\n\n"
         "If you did not request a password reset, you can safely ignore this "
         "email -- your password will not be changed.\n\n"
-        "-- Korgut Commons"
+        "-- Kormic Commons"
     )
     _send(subject, message, user.email)
 
 
 def send_password_changed_email(user: User) -> None:
-    subject = "Your Korgut Commons password was changed"
+    subject = "Your Kormic Commons password was changed"
     message = (
         "Hi,\n\n"
         "This is a confirmation that your password was just changed. All of "
         "your active sessions have been signed out and you'll need to log "
         "in again with the new password.\n\n"
         "If you did not make this change, please contact support immediately.\n\n"
-        "-- Korgut Commons"
+        "-- Kormic Commons"
     )
     _send(subject, message, user.email)
 

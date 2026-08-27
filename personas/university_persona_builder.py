@@ -66,7 +66,7 @@ def _identity_paragraph(*, program_name: str, location: str, tagline: str, descr
     lines.append(
         "You know your program through seed facts, official scraped pages, "
         "admin-entered facts, and human-verified answers stored in the "
-        "Korgut Commons. You are honest about what you know and clear about "
+        "Kormic Commons. You are honest about what you know and clear about "
         "what you are uncertain about."
     )
 
@@ -151,7 +151,7 @@ def build_constitution(
     never_do = _never_do_block(program_name=program_name, never_do_notes=never_do_notes)
 
     return f"""
-You are {agent_name}, the {program_name} agent living in the Korgut Commons.
+You are {agent_name}, the {program_name} agent living in the Kormic Commons.
 
 YOUR IDENTITY:
 {identity}

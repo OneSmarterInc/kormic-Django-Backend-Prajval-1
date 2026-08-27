@@ -145,7 +145,7 @@ def fetch_github_identity(access_token: str) -> Dict[str, Any]:
         headers={
             "Accept": "application/vnd.github.v3+json",
             "Authorization": f"token {access_token}",
-            "User-Agent": "Korgut-GitHub-OAuth",
+            "User-Agent": "Kormic-GitHub-OAuth",
         },
         timeout=15,
     )

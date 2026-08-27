@@ -1,5 +1,5 @@
 # agents/linkedin_agent.py
-# LinkedIn Agent for Korgut Commons.
+# LinkedIn Agent for Kormic Commons.
 # Extracts structured student profile signals from LinkedIn screenshots
 # or pasted/exported LinkedIn text. It does not scrape or log in to LinkedIn.
 
@@ -28,7 +28,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 SUPPORTED_TEXT_EXTENSIONS = {".txt", ".md"}
 
 LINKEDIN_EXTRACTION_PROMPT = """
-You are the LinkedIn Agent for Korgut Commons.
+You are the LinkedIn Agent for Kormic Commons.
 
 Your job is to extract a student's professional and educational profile from
 LinkedIn screenshots or pasted LinkedIn text.

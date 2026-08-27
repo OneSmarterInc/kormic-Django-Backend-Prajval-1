@@ -1,5 +1,5 @@
 # agents/university_agent.py
-# The university agent for the Korgut Commons.
+# The university agent for the Kormic Commons.
 # Each instance represents one university's graduate program.
 # Handles verified knowledge, website scraping, pending queries, and fit assessment.
 
@@ -39,7 +39,7 @@ def _get_anthropic_client() -> anthropic.Anthropic:
 
 class UniversityAgent:
     """
-    A university agent in the Korgut Commons.
+    A university agent in the Kormic Commons.
 
     On creation it:
     1. Loads its persona and constitution.

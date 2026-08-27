@@ -58,7 +58,7 @@ def _format_result(result: Dict[str, Any], agent_label: str) -> str:
 def build_tools(ctx: Dict[str, Any]) -> List[Any]:
     @tool
     def list_universities() -> str:
-        """List every university agent available in the Korgut Commons (id
+        """List every university agent available in the Kormic Commons (id
         and display name). Use this to discover what universities you can
         consult before asking one by id."""
         lines = [f"- {u['id']}: {u['name']}" for u in commons.list_university_directory()]
