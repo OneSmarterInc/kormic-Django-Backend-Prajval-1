@@ -33,7 +33,8 @@ class AskUniversityToolConversationLoggingTests(TestCase):
 
     def setUp(self):
         _reset_inprocess_agent_caches()
-        University.objects.create(id="tool_log_u", name="Tool Log University", agent_name="Nova5")
+        u = University.objects.create(name="Tool Log University", agent_name="Nova5")
+        self.university_id = str(u.uuid)
         self.ctx = {
             "canonical_student_id": "student_tool_log",
             "student_profile": {"student_id": "student_tool_log", "name": "Tester"},
@@ -49,14 +50,14 @@ class AskUniversityToolConversationLoggingTests(TestCase):
         })
 
         result = self.tools["ask_university"].invoke({
-            "university_id": "tool_log_u",
+            "university_id": self.university_id,
             "question": "What is the deadline?",
         })
 
         self.assertIn("March 1", result)
         log = AgentConversationLog.objects.get()
         self.assertEqual(log.asker.owner_id, "student_tool_log")
-        self.assertEqual(log.responder.owner_id, "tool_log_u")
+        self.assertEqual(log.responder.owner_id, self.university_id)
         self.assertEqual(log.question, "What is the deadline?")
         self.assertIn("March 1", log.answer)
         self.assertEqual(log.confidence, 0.9)

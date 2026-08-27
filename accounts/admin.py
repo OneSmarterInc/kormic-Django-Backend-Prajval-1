@@ -5,9 +5,10 @@ from accounts.models import Account, TOTPBackupCode, TOTPDevice
 
 @admin.register(Account)
 class AccountAdmin(admin.ModelAdmin):
-    list_display = ("user", "role", "student_id", "university_id", "institute_id", "created_at")
-    search_fields = ("user__email", "student_id", "university_id", "institute_id")
+    list_display = ("user", "role", "student_uuid", "university_uuid", "institute_uuid", "created_at")
+    search_fields = ("user__email",)
     list_filter = ("role",)
+    raw_id_fields = ("user", "student_profile", "university", "institute")
 
 
 @admin.register(TOTPDevice)

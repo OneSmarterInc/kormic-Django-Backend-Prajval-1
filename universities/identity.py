@@ -11,21 +11,6 @@ def _normalized(name: str) -> str:
     return str(name or "").strip()
 
 
-def make_university_id(institution_name: str) -> str:
-    """Slugify to [a-z0-9_]+ (same charset as django_api.services.make_student_id
-    and institutes.identity.make_institute_id) and resolve collisions with a
-    numbered suffix, since this becomes a permanent primary key and must be
-    guaranteed unique up front. See korgut_backend.slugs.unique_slug."""
-    from korgut_backend.slugs import unique_slug
-    from universities.models import University
-
-    return unique_slug(
-        institution_name,
-        exists=lambda candidate: University.objects.filter(pk=candidate).exists(),
-        default="university",
-    )
-
-
 def is_agent_name_available(name: str, exclude_university_id: Optional[str] = None) -> bool:
     """Case-insensitive uniqueness check across every university's agent name."""
     from universities.models import University
@@ -36,7 +21,8 @@ def is_agent_name_available(name: str, exclude_university_id: Optional[str] = No
 
     query = University.objects.filter(agent_name__iexact=name)
     if exclude_university_id:
-        query = query.exclude(pk=exclude_university_id)
+        # exclude_university_id is the public uuid string, not the int PK.
+        query = query.exclude(uuid=exclude_university_id)
 
     return not query.exists()
 

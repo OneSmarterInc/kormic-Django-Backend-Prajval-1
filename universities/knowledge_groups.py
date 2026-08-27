@@ -67,11 +67,11 @@ def resolve_group_for_question(university_id: str, question: str) -> Optional[Kn
     stays best-effort rather than blocking escalation creation on setup."""
     slug = classify_group_slug(question)
 
-    group = KnowledgeGroup.objects.filter(university_id=university_id, slug=slug).first()
+    group = KnowledgeGroup.objects.filter(university__uuid=university_id, slug=slug).first()
     if group is not None:
         return group
 
-    return KnowledgeGroup.objects.filter(university_id=university_id).order_by("slug").first()
+    return KnowledgeGroup.objects.filter(university__uuid=university_id).order_by("slug").first()
 
 
 def ensure_default_groups(university: University) -> List[KnowledgeGroup]:
@@ -107,7 +107,7 @@ def escalation_counts_by_group(university_id: str) -> Dict[str, int]:
 
     counts = {
         slug: 0
-        for slug in KnowledgeGroup.objects.filter(university_id=university_id).values_list("slug", flat=True)
+        for slug in KnowledgeGroup.objects.filter(university__uuid=university_id).values_list("slug", flat=True)
     }
 
     rows = (

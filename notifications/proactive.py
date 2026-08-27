@@ -85,10 +85,12 @@ def run_checkin_for_student(
     one batched Expo call (see notifications.tasks).
     """
     from accounts.models import Account
-    from django_api.services import load_profile_data, make_student_id
+    from django_api.services import as_uuid, load_profile_data
     from notifications.services import send_agent_message
 
-    account = Account.objects.filter(student_id=make_student_id(student_id)).first()
+    if not as_uuid(student_id):
+        return None
+    account = Account.objects.filter(student_profile__uuid=student_id).first()
     if account is None:
         return None
 

@@ -41,7 +41,7 @@ class VerificationCheck(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self) -> str:
-        return f"VerificationCheck({self.student.student_id}, {self.status})"
+        return f"VerificationCheck({self.student.uuid}, {self.status})"
 
 
 class VerificationItem(models.Model):

@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from personas.university_persona_builder import build_constitution
-from universities.identity import ensure_agent_name, make_university_id
+from universities.identity import ensure_agent_name
 from universities.models import University
 
 
@@ -17,7 +17,7 @@ def build_persona_dict(university: University) -> Dict[str, Any]:
     personas.university_personas.UNIVERSITY_PERSONAS[id] used to have, so
     agents.university_agent.UniversityAgent needs no further changes."""
     constitution = build_constitution(
-        agent_name=university.agent_name or university.id,
+        agent_name=university.agent_name or str(university.uuid),
         program_name=university.name,
         location=university.location,
         tagline=university.tagline,
@@ -31,7 +31,7 @@ def build_persona_dict(university: University) -> Dict[str, Any]:
 
     return {
         "name": university.name,
-        "agent_name": university.agent_name or university.id,
+        "agent_name": university.agent_name or str(university.uuid),
         "location": university.location,
         "tagline": university.tagline,
         "constitution": constitution,
@@ -47,8 +47,7 @@ def register_university(institution_name: str) -> University:
     agent name -- the registration-time half of the two-phase flow. Setup
     (description/contacts/eligibility/scrape URLs/knowledge) all happens
     afterward via the universities-admin endpoints."""
-    university_id = make_university_id(institution_name)
-    university = University.objects.create(id=university_id, name=institution_name.strip())
+    university = University.objects.create(name=institution_name.strip())
     ensure_agent_name(university)
     return university
 
@@ -106,7 +105,8 @@ def sync_profile_facts_to_kb(university: University) -> None:
     (topic, content)."""
     from django_api.models import UniversityKnowledgeEntry
 
-    kb = _kb_for(university.id)
+    university_id = str(university.uuid)
+    kb = _kb_for(university_id)
     topics_to_replace: List[str] = [PROGRAM_OVERVIEW_TOPIC, CONTACT_INFO_TOPIC]
 
     eligibility_topics = [
@@ -116,7 +116,7 @@ def sync_profile_facts_to_kb(university: University) -> None:
     ]
     topics_to_replace.extend(eligibility_topics)
 
-    UniversityKnowledgeEntry.objects.filter(university_id=university.id, topic__in=topics_to_replace).delete()
+    UniversityKnowledgeEntry.objects.filter(university_id=university_id, topic__in=topics_to_replace).delete()
     # The in-memory KB instance was loaded before the delete above; drop its
     # cached copies of these topics too so store()'s duplicate-detection
     # doesn't resurrect a stale entry instead of writing the new content.
@@ -211,9 +211,10 @@ def scrape_now(university: University) -> Dict[str, Any]:
     different wording each time."""
     from knowledge.scraper import scrape_university
 
+    university_id = str(university.uuid)
     urls = _dedupe_urls(list(university.scrape_urls or []))
-    kb = _kb_for(university.id)
-    already_scraped = _already_scraped_urls(university.id)
+    kb = _kb_for(university_id)
+    already_scraped = _already_scraped_urls(university_id)
 
     results: List[Dict[str, Any]] = []
     for url in urls:
@@ -221,7 +222,7 @@ def scrape_now(university: University) -> Dict[str, Any]:
             results.append({"url": url, "status": "skipped", "facts_stored": 0, "reason": _ALREADY_SCRAPED_REASON})
             continue
         try:
-            count = scrape_university(university.id, [url], university.name, kb)
+            count = scrape_university(university_id, [url], university.name, kb)
             results.append({"url": url, "status": "ok", "facts_stored": count})
             if count:
                 already_scraped.add(url)
@@ -249,9 +250,10 @@ def scrape_selected_urls(university: University, urls: List[str], group_id: Opti
     URLs overlap one already scraped) doesn't re-ingest the same content."""
     from knowledge.scraper import scrape_university
 
+    university_id = str(university.uuid)
     urls = _dedupe_urls(list(urls))
-    kb = _kb_for(university.id)
-    already_scraped = _already_scraped_urls(university.id)
+    kb = _kb_for(university_id)
+    already_scraped = _already_scraped_urls(university_id)
 
     results: List[Dict[str, Any]] = []
     for url in urls:
@@ -259,7 +261,7 @@ def scrape_selected_urls(university: University, urls: List[str], group_id: Opti
             results.append({"url": url, "status": "skipped", "facts_stored": 0, "reason": _ALREADY_SCRAPED_REASON})
             continue
         try:
-            count = scrape_university(university.id, [url], university.name, kb, group_id=group_id)
+            count = scrape_university(university_id, [url], university.name, kb, group_id=group_id)
             results.append({"url": url, "status": "ok", "facts_stored": count})
             if count:
                 already_scraped.add(url)
@@ -288,7 +290,7 @@ def add_manual_knowledge_fact(
         from universities.models import KnowledgeGroup
 
         group_id = (
-            KnowledgeGroup.objects.filter(university_id=university_id, slug=group_slug)
+            KnowledgeGroup.objects.filter(university__uuid=university_id, slug=group_slug)
             .values_list("id", flat=True)
             .first()
         )
@@ -318,7 +320,7 @@ def university_setup_status(university_id: str) -> Dict[str, Any]:
     mirrors accounts.serializers.student_onboarding_status."""
     from django_api.models import UniversityKnowledgeEntry
 
-    university = University.objects.filter(pk=university_id).first()
+    university = University.objects.filter(uuid=university_id).first()
 
     if university is None:
         return {

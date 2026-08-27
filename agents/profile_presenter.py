@@ -53,7 +53,7 @@ class ProfilePresenterAgent:
 
         from universities.models import University
 
-        university = University.objects.filter(pk=university_id).first()
+        university = University.objects.filter(uuid=university_id).first()
         self.university_name = university.name if university else university_id
         self.agent_name = (university.agent_name if university else None) or university_id
         self.constitution = _build_presenter_constitution(self.university_name, self.agent_name)

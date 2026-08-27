@@ -205,7 +205,11 @@ def get_valid_access_token(connection: GitHubOAuthConnection) -> str:
 
 
 def get_connection_for_student_id(student_id: str) -> Optional[GitHubOAuthConnection]:
-    account = Account.objects.filter(student_id=student_id).select_related("user").first()
+    from django_api.services import as_uuid
+
+    if not as_uuid(student_id):
+        return None
+    account = Account.objects.filter(student_profile__uuid=student_id).select_related("user").first()
     if account is None:
         return None
 

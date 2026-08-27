@@ -40,15 +40,15 @@ class KnowledgeGroupClassificationTests(TestCase):
 
 class KnowledgeGroupResolutionTests(TestCase):
     def setUp(self):
-        self.university = University.objects.create(id="write_state", name="Write State")
+        self.university = University.objects.create(name="Write State")
 
     def test_no_groups_configured_returns_none(self):
-        self.assertIsNone(resolve_group_for_question(self.university.id, "What is the tuition?"))
+        self.assertIsNone(resolve_group_for_question(str(self.university.uuid), "What is the tuition?"))
 
     def test_resolves_matching_group(self):
         ensure_default_groups(self.university)
 
-        group = resolve_group_for_question(self.university.id, "What is the assistantship stipend?")
+        group = resolve_group_for_question(str(self.university.uuid), "What is the assistantship stipend?")
 
         self.assertEqual(group.slug, KnowledgeGroup.Slug.MONEY)
 
@@ -59,7 +59,7 @@ class KnowledgeGroupResolutionTests(TestCase):
             escalation_contact_email="life@wsu.edu",
         )
 
-        group = resolve_group_for_question(self.university.id, "What is the assistantship stipend?")
+        group = resolve_group_for_question(str(self.university.uuid), "What is the assistantship stipend?")
 
         self.assertEqual(group.slug, KnowledgeGroup.Slug.CAMPUS_LIFE)
 
@@ -76,16 +76,16 @@ class KnowledgeGroupResolutionTests(TestCase):
 class EscalationCountsTests(TestCase):
     def setUp(self):
         self.university = University.objects.create(
-            id="write_state_counts", name="Write State", contact_email="admissions@wsu.edu"
+            name="Write State", contact_email="admissions@wsu.edu"
         )
         ensure_default_groups(self.university)
 
     def test_counts_by_group(self):
         money_group = self.university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
-        PendingQuery.objects.create(university_id=self.university.id, question="stipend?", group=money_group)
-        PendingQuery.objects.create(university_id=self.university.id, question="stipend again?", group=money_group)
+        PendingQuery.objects.create(university_id=str(self.university.uuid), question="stipend?", group=money_group)
+        PendingQuery.objects.create(university_id=str(self.university.uuid), question="stipend again?", group=money_group)
 
-        counts = escalation_counts_by_group(self.university.id)
+        counts = escalation_counts_by_group(str(self.university.uuid))
 
         self.assertEqual(counts[KnowledgeGroup.Slug.MONEY], 2)
         self.assertEqual(counts[KnowledgeGroup.Slug.ADMISSIONS], 0)
@@ -93,7 +93,7 @@ class EscalationCountsTests(TestCase):
 
 class KnowledgeGroupAPITests(TestCase):
     def setUp(self):
-        self.client = make_university_client(email="officer1@wsu.edu", university_id="write_state_api")
+        self.client, self.university_id = make_university_client(email="officer1@wsu.edu", university_id="write_state_api")
 
     def test_get_lazily_bootstraps_four_groups(self):
         resp = self.client.get("/api/university-admin/knowledge-groups/")
@@ -127,12 +127,12 @@ class KnowledgeGroupAPITests(TestCase):
 
     def _seed_two_group_escalations(self):
         self.client.get("/api/university-admin/knowledge-groups/")
-        university = University.objects.get(id="write_state_api")
+        university = University.objects.get(name="write_state_api")
         money = university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
         admissions = university.knowledge_groups.get(slug=KnowledgeGroup.Slug.ADMISSIONS)
 
         PendingQuery.objects.create(
-            university_id=university.id,
+            university_id=str(university.uuid),
             question="Is the stipend taxed?",
             group=money,
             student_name="Ada Lovelace",
@@ -141,7 +141,7 @@ class KnowledgeGroupAPITests(TestCase):
             escalation_chain=["wsu-agent", "money"],
         )
         PendingQuery.objects.create(
-            university_id=university.id, question="deadline?", group=admissions
+            university_id=str(university.uuid), question="deadline?", group=admissions
         )
         return university, money
 
@@ -173,8 +173,8 @@ class KnowledgeGroupAPITests(TestCase):
 
 class ManualKnowledgeFactGroupTaggingTests(TestCase):
     def setUp(self):
-        self.client = make_university_client(email="officer2@wsu.edu", university_id="write_state_facts")
-        self.university = University.objects.get(id="write_state_facts")
+        self.client, self.university_id = make_university_client(email="officer2@wsu.edu", university_id="write_state_facts")
+        self.university = University.objects.get(name="write_state_facts")
         ensure_default_groups(self.university)
 
     def test_post_tags_fact_with_group(self):
@@ -218,8 +218,8 @@ class ScrapeNowJobTests(TestCase):
     """
 
     def setUp(self):
-        self.client = make_university_client(email="officer3@wsu.edu", university_id="write_state_scrape")
-        self.university = University.objects.get(id="write_state_scrape")
+        self.client, self.university_id = make_university_client(email="officer3@wsu.edu", university_id="write_state_scrape")
+        self.university = University.objects.get(name="write_state_scrape")
         self.university.scrape_urls = ["https://write-state.example/admissions"]
         self.university.save(update_fields=["scrape_urls"])
 

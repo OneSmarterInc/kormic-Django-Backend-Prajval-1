@@ -27,7 +27,7 @@ def purge_student_data(student_id: str) -> None:
 
     # Cascades ResumeUpload/GitHubAnalysis/LinkedInAnalysis/FitAssessment/
     # RoadmapVersion, which are real FKs to StudentProfile.
-    StudentProfile.objects.filter(student_id=student_id).delete()
+    StudentProfile.objects.filter(uuid=student_id).delete()
     AriaMemory.objects.filter(student_id=student_id).delete()
     IntakeSession.objects.filter(student_id=student_id).delete()
     ChatMessage.objects.filter(student_id=student_id).delete()
@@ -164,8 +164,8 @@ def log_activity(
             account = getattr(target_user, "account", None)
             if account:
                 target_role = account.role
-                target_student_id = account.student_id or ""
-                target_university_id = account.university_id or ""
+                target_student_id = account.student_uuid or ""
+                target_university_id = account.university_uuid or ""
 
     ActivityLog.objects.create(
         actor=actor,

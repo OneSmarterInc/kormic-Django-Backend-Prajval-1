@@ -1,6 +1,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 
@@ -10,7 +12,10 @@ def default_priority_tier_bounds() -> dict:
 
 
 class University(models.Model):
-    id = models.SlugField(primary_key=True, max_length=255)
+    # Public, non-guessable identifier used in every API URL, cache key, and
+    # cross-table string reference. The integer auto `id` stays purely
+    # internal (FKs, joins, admin). Replaces the previous name-derived slug PK.
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
 
     # -- identity (mirrors the old UNIVERSITY_PERSONAS entry shape) --
     name = models.CharField(max_length=500)

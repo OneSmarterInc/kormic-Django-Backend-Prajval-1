@@ -19,7 +19,6 @@ from rest_framework.test import APIClient
 
 from accounts.models import Account
 from django_api.models import StudentProfile
-from django_api.services import make_student_id
 from institutes.services import register_institute
 
 from .models import ListedStudent, UniversityStudentList
@@ -49,13 +48,13 @@ class ClaimFlowTests(TestCase):
         user = get_user_model().objects.create_user(
             username="officer@wsfi.edu", email="officer@wsfi.edu", password="x"
         )
-        Account.objects.create(user=user, role=Account.Role.INSTITUTE, institute_id=self.institute.id)
+        Account.objects.create(user=user, role=Account.Role.INSTITUTE, institute=self.institute)
         self.client.force_authenticate(user=user)
         resp = self.client.post(
             "/api/institute-lists/upload/",
             {
                 "file": io.BytesIO(CSV.encode()),
-                "institute_id": self.institute.id,
+                "institute_id": str(self.institute.uuid),
                 "contact_name": "Dr. John",
                 "contact_email": "john@wsfi.edu",
                 "contact_verification": "institutional email domain",
@@ -149,11 +148,11 @@ class ClaimFlowTests(TestCase):
         self.assertEqual(row.status, ListedStudent.Status.CLAIMED)
         self.assertEqual(row.divergences[0]["field"], "field_of_study")
 
-        profile = StudentProfile.objects.get(student_id=make_student_id("priya.sharma@gmail.com"))
+        profile = StudentProfile.objects.get(email__iexact="priya.sharma@gmail.com")
         # the claim address was NOT editable -- attacker@evil.com ignored
         self.assertEqual(profile.email, "priya.sharma@gmail.com")
         self.assertEqual(profile.major, "Computer Science")
-        self.assertEqual(profile.extra_data["institute_sourced"]["institute_id"], self.institute.id)
+        self.assertEqual(profile.extra_data["institute_sourced"]["institute_id"], str(self.institute.uuid))
 
     def test_claimed_invitation_is_dead(self):
         session = self._verified_session()
@@ -179,7 +178,7 @@ class ClaimFlowTests(TestCase):
             "/api/institute-lists/upload/",
             {
                 "file": io.BytesIO(changed.encode()),
-                "institute_id": self.institute.id,
+                "institute_id": str(self.institute.uuid),
                 "contact_name": "Dr. John",
                 "contact_email": "john@wsfi.edu",
             },
@@ -187,7 +186,7 @@ class ClaimFlowTests(TestCase):
         )
         data = resp.json()
         self.assertEqual(len(data["skipped_claimed"]), 1)
-        profile = StudentProfile.objects.get(student_id=make_student_id("priya.sharma@gmail.com"))
+        profile = StudentProfile.objects.get(email__iexact="priya.sharma@gmail.com")
         self.assertEqual(profile.name, "Priya Sharma")  # untouched
 
     # -------------------------------------------------------------- ownership
@@ -200,7 +199,7 @@ class ClaimFlowTests(TestCase):
             "/api/institute-lists/upload/",
             {
                 "file": io.BytesIO(CSV.encode()),
-                "institute_id": other.id,
+                "institute_id": str(other.uuid),
                 "contact_name": "Dr. John",
                 "contact_email": "john@wsfi.edu",
             },
@@ -223,7 +222,7 @@ class ClaimFlowTests(TestCase):
         other_user = get_user_model().objects.create_user(
             username="officer@other.edu", email="officer@other.edu", password="x"
         )
-        Account.objects.create(user=other_user, role=Account.Role.INSTITUTE, institute_id=other.id)
+        Account.objects.create(user=other_user, role=Account.Role.INSTITUTE, institute=other)
         self.client.force_authenticate(user=other_user)
         resp = self.client.get(f"/api/institute-lists/lists/{self.upload['list_id']}/students/")
         self.assertEqual(resp.status_code, 403)
@@ -336,7 +335,7 @@ class ClaimFlowTests(TestCase):
         other_list = UniversityStudentList.objects.create(institute=other, contact_name="x", contact_email="x@x.com")
         other_row = ListedStudent.objects.create(
             source_list=other_list,
-            institute_id=other.id,
+            institute_id=str(other.uuid),
             full_name="Other Student",
             email="other.student@gmail.com",
         )
@@ -351,7 +350,7 @@ class ClaimFlowTests(TestCase):
         other_user = get_user_model().objects.create_user(
             username="officer2@other.edu", email="officer2@other.edu", password="x"
         )
-        Account.objects.create(user=other_user, role=Account.Role.INSTITUTE, institute_id=other.id)
+        Account.objects.create(user=other_user, role=Account.Role.INSTITUTE, institute=other)
         self.client.force_authenticate(user=other_user)
         row = ListedStudent.objects.filter(source_list_id=self.upload["list_id"]).first()
 
@@ -395,13 +394,13 @@ class ClaimRateLimitTests(TestCase):
         user = get_user_model().objects.create_user(
             username="officer@rli.edu", email="officer@rli.edu", password="x"
         )
-        Account.objects.create(user=user, role=Account.Role.INSTITUTE, institute_id=self.institute.id)
+        Account.objects.create(user=user, role=Account.Role.INSTITUTE, institute=self.institute)
         self.client.force_authenticate(user=user)
         self.client.post(
             "/api/institute-lists/upload/",
             {
                 "file": io.BytesIO(CSV.encode()),
-                "institute_id": self.institute.id,
+                "institute_id": str(self.institute.uuid),
                 "contact_name": "Dr. John",
                 "contact_email": "john@rli.edu",
                 "contact_verification": "institutional email domain",

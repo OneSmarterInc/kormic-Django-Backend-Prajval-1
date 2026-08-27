@@ -7,7 +7,6 @@ from rest_framework import serializers
 
 from accounts.models import Account
 from django_api.models import StudentProfile
-from django_api.services import make_student_id
 
 # Same field set universities.views.UniversityProfileAPIView lets a
 # university officer patch on their own profile, just reachable here for any
@@ -62,19 +61,9 @@ class AdminCreateStudentSerializer(serializers.Serializer):
         validate_password(value)
         return value
 
-    def validate(self, attrs):
-        student_id = make_student_id(attrs["email"])
-        if Account.objects.filter(student_id=student_id).exists():
-            raise serializers.ValidationError(
-                {"student_id": "An account derived from this email already exists."}
-            )
-        attrs["student_id"] = student_id
-        return attrs
-
     def create(self, validated_data) -> User:
         email = validated_data["email"]
         name = validated_data.get("name", "")
-        student_id = validated_data["student_id"]
 
         with transaction.atomic():
             user = User.objects.create_user(
@@ -83,10 +72,9 @@ class AdminCreateStudentSerializer(serializers.Serializer):
                 password=validated_data["password"],
                 first_name=name[:150],
             )
-            Account.objects.create(user=user, role=Account.Role.STUDENT, student_id=student_id)
-            StudentProfile.objects.get_or_create(
-                student_id=student_id,
-                defaults={"name": name, "email": email},
+            profile = StudentProfile.objects.create(name=name, email=email)
+            Account.objects.create(
+                user=user, role=Account.Role.STUDENT, student_profile=profile
             )
 
         return user
@@ -188,7 +176,7 @@ class AdminEnrollUniversitySerializer(serializers.Serializer):
                 password=validated_data["password"],
                 first_name=validated_data.get("name", "")[:150],
             )
-            Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university_id=university.id)
+            Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university=university)
 
         return university
 
@@ -242,6 +230,6 @@ class AdminEnrollInstituteSerializer(serializers.Serializer):
                 password=validated_data["password"],
                 first_name=validated_data.get("name", "")[:150],
             )
-            Account.objects.create(user=admin_user, role=Account.Role.INSTITUTE, institute_id=institute.id)
+            Account.objects.create(user=admin_user, role=Account.Role.INSTITUTE, institute=institute)
 
         return institute

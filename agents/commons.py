@@ -74,7 +74,7 @@ def list_university_ids() -> List[str]:
     """Every known university id, name-sorted."""
     from universities.models import University
 
-    return list(University.objects.order_by("name").values_list("id", flat=True))
+    return [str(u) for u in University.objects.order_by("name").values_list("uuid", flat=True)]
 
 
 def list_university_directory() -> List[Dict[str, str]]:
@@ -84,7 +84,7 @@ def list_university_directory() -> List[Dict[str, str]]:
     from universities.models import University
 
     return [
-        {"id": row.id, "name": row.name, "agent_name": row.agent_name or row.id}
+        {"id": str(row.uuid), "name": row.name, "agent_name": row.agent_name or str(row.uuid)}
         for row in University.objects.order_by("name")
     ]
 
@@ -92,9 +92,13 @@ def list_university_directory() -> List[Dict[str, str]]:
 def get_university_agent_label(university_id: str) -> str:
     """Display label (agent name, falling back to name/id) for a university
     without constructing a full UniversityAgent."""
+    from django_api.services import as_uuid
     from universities.models import University
 
-    university = University.objects.filter(pk=university_id).first()
+    university = (
+        University.objects.filter(uuid=university_id).first()
+        if as_uuid(university_id) else None
+    )
     if university is None:
         return university_id
 
@@ -114,9 +118,10 @@ def get_university_agent(university_id: str, auto_scrape: Optional[bool] = None)
         return _university_agents[university_id]
 
     from agents.university_agent import UniversityAgent
+    from django_api.services import as_uuid
     from universities.models import University
 
-    if not University.objects.filter(pk=university_id).exists():
+    if not as_uuid(university_id) or not University.objects.filter(uuid=university_id).exists():
         raise ValueError(f"Unknown university_id: {university_id}")
 
     if auto_scrape is None:
@@ -249,9 +254,13 @@ def _fallback_fit_assessment(profile: Dict[str, Any], university_id: str, agent:
     else:
         gaps.append("Budget may be tight for US graduate study.")
 
+    from django_api.services import as_uuid
     from universities.models import University
 
-    university = University.objects.filter(pk=university_id).first()
+    university = (
+        University.objects.filter(uuid=university_id).first()
+        if as_uuid(university_id) else None
+    )
     university_name = university.name if university else university_id
     agent_name = (
         (university.agent_name if university else None)
@@ -312,13 +321,15 @@ def generate_fit_assessment(student_id: str, university_id: str, force: bool = F
     when a fit/match question comes up in chat.
     """
     from django_api.models import FitAssessment, StudentProfile
-    from django_api.services import load_profile_data, make_student_id, save_profile_data
+    from django_api.services import as_uuid, load_profile_data, save_profile_data
 
-    student_key = make_student_id(student_id)
+    student_key = as_uuid(student_id)
+    if student_key is None:
+        raise ValueError(f"Invalid student_id: {student_id!r}")
 
     if not force:
         cached = (
-            FitAssessment.objects.filter(student__student_id=student_key, university_id=university_id)
+            FitAssessment.objects.filter(student__uuid=student_key, university_id=university_id)
             .order_by("-created_at")
             .first()
         )
@@ -345,7 +356,7 @@ def generate_fit_assessment(student_id: str, university_id: str, force: bool = F
 
     # A fit assessment can be requested before the student has a saved
     # StudentProfile row -- create one rather than 500 on .get().
-    student_row, _ = StudentProfile.objects.get_or_create(student_id=student_key)
+    student_row, _ = StudentProfile.objects.get_or_create(uuid=student_key)
     row = FitAssessment.objects.create(
         student=student_row,
         university_id=university_id,

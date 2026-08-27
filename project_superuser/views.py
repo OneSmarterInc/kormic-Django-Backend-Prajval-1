@@ -43,9 +43,9 @@ def _serialize_account(account: Account) -> Dict[str, Any]:
         "email": user.email,
         "name": user.first_name,
         "role": account.role,
-        "student_id": account.student_id,
-        "university_id": account.university_id,
-        "institute_id": account.institute_id,
+        "student_id": account.student_uuid,
+        "university_id": account.university_uuid,
+        "institute_id": account.institute_uuid,
         "is_active": user.is_active,
         "totp_enrolled": TOTPDevice.objects.filter(user=user, confirmed_at__isnull=False).exists(),
         "date_joined": user.date_joined,
@@ -59,14 +59,14 @@ def _serialize_university(university: University) -> Dict[str, Any]:
     # AdminEnrollUniversitySerializer) -- surfaced here so a superadmin
     # dashboard can show/contact the login without a separate /users/ call.
     admin_account = (
-        Account.objects.filter(university_id=university.id, role=Account.Role.UNIVERSITY)
+        Account.objects.filter(university=university, role=Account.Role.UNIVERSITY)
         .select_related("user")
         .order_by("created_at")
         .first()
     )
 
     return {
-        "id": university.id,
+        "id": str(university.uuid),
         "name": university.name,
         "agent_name": university.agent_name,
         "location": university.location,
@@ -93,8 +93,8 @@ def _serialize_university(university: University) -> Dict[str, Any]:
             if admin_account
             else None
         ),
-        "officer_count": Account.objects.filter(university_id=university.id, role=Account.Role.UNIVERSITY).count(),
-        "setup_status": university_setup_status(university.id),
+        "officer_count": Account.objects.filter(university=university, role=Account.Role.UNIVERSITY).count(),
+        "setup_status": university_setup_status(str(university.uuid)),
         "created_at": university.created_at,
         "updated_at": university.updated_at,
     }
@@ -119,14 +119,15 @@ class AdminStudentListCreateAPIView(APIView):
         if search:
             accounts = accounts.filter(user__email__icontains=search)
 
+        profile_pks = [a.student_profile_id for a in accounts if a.student_profile_id]
         profiles_by_id = {
-            p.student_id: p
-            for p in StudentProfile.objects.filter(student_id__in=[a.student_id for a in accounts])
+            str(p.uuid): p
+            for p in StudentProfile.objects.filter(pk__in=profile_pks)
         }
 
         students = []
         for account in accounts:
-            profile = profiles_by_id.get(account.student_id)
+            profile = profiles_by_id.get(account.student_uuid)
             students.append({
                 **_serialize_account(account),
                 "institution": profile.institution if profile else "",
@@ -155,7 +156,11 @@ class AdminStudentDetailAPIView(APIView):
     permission_classes = SUPERUSER_PERMISSIONS
 
     def _get_account(self, student_id: str):
-        return Account.objects.filter(role=Account.Role.STUDENT, student_id=student_id).select_related("user").first()
+        return (
+            Account.objects.filter(role=Account.Role.STUDENT, student_profile__uuid=student_id)
+            .select_related("user")
+            .first()
+        )
 
     def get(self, request, student_id: str):
         account = self._get_account(student_id)
@@ -232,13 +237,13 @@ class AdminUniversityDetailAPIView(APIView):
     permission_classes = SUPERUSER_PERMISSIONS
 
     def get(self, request, university_id: str):
-        university = University.objects.filter(pk=university_id).first()
+        university = University.objects.filter(uuid=university_id).first()
         if university is None:
             return _error("University not found.", status.HTTP_404_NOT_FOUND)
         return Response(_serialize_university(university))
 
     def patch(self, request, university_id: str):
-        university = University.objects.filter(pk=university_id).first()
+        university = University.objects.filter(uuid=university_id).first()
         if university is None:
             return _error("University not found.", status.HTTP_404_NOT_FOUND)
 
@@ -266,11 +271,11 @@ class AdminUniversityDetailAPIView(APIView):
         return Response(_serialize_university(university))
 
     def delete(self, request, university_id: str):
-        university = University.objects.filter(pk=university_id).first()
+        university = University.objects.filter(uuid=university_id).first()
         if university is None:
             return _error("University not found.", status.HTTP_404_NOT_FOUND)
 
-        if Account.objects.filter(university_id=university_id, role=Account.Role.UNIVERSITY).exists():
+        if Account.objects.filter(university__uuid=university_id, role=Account.Role.UNIVERSITY).exists():
             return _error(
                 "This university still has officer accounts. Remove or reassign them via "
                 "/api/superuser/users/ first.",
@@ -292,14 +297,14 @@ class AdminUniversityDetailAPIView(APIView):
 def _serialize_institute(institute: Institute) -> Dict[str, Any]:
     # Exactly one admin login is created per institute today same pattern as _serialize_university.
     admin_account = (
-        Account.objects.filter(institute_id=institute.id, role=Account.Role.INSTITUTE)
+        Account.objects.filter(institute=institute, role=Account.Role.INSTITUTE)
         .select_related("user")
         .order_by("created_at")
         .first()
     )
 
     return {
-        "id": institute.id,
+        "id": str(institute.uuid),
         "name": institute.name,
         "contact_email": institute.contact_email,
         "contact_phone": institute.contact_phone,
@@ -365,13 +370,13 @@ class AdminInstituteDetailAPIView(APIView):
     PATCHABLE_FIELDS = {"name", "contact_email", "contact_phone", "address"}
 
     def get(self, request, institute_id: str):
-        institute = Institute.objects.filter(pk=institute_id).first()
+        institute = Institute.objects.filter(uuid=institute_id).first()
         if institute is None:
             return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
         return Response(_serialize_institute(institute))
 
     def patch(self, request, institute_id: str):
-        institute = Institute.objects.filter(pk=institute_id).first()
+        institute = Institute.objects.filter(uuid=institute_id).first()
         if institute is None:
             return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
 
@@ -390,11 +395,11 @@ class AdminInstituteDetailAPIView(APIView):
         return Response(_serialize_institute(institute))
 
     def delete(self, request, institute_id: str):
-        institute = Institute.objects.filter(pk=institute_id).first()
+        institute = Institute.objects.filter(uuid=institute_id).first()
         if institute is None:
             return _error("Institute not found.", status.HTTP_404_NOT_FOUND)
 
-        if Account.objects.filter(institute_id=institute_id, role=Account.Role.INSTITUTE).exists():
+        if Account.objects.filter(institute__uuid=institute_id, role=Account.Role.INSTITUTE).exists():
             return _error(
                 "This institute still has an admin account. Remove or reassign it via "
                 "/api/superuser/users/ first.",
@@ -403,7 +408,7 @@ class AdminInstituteDetailAPIView(APIView):
 
         from institutes_list.models import UniversityStudentList
 
-        if UniversityStudentList.objects.filter(institute_id=institute_id).exists():
+        if UniversityStudentList.objects.filter(institute__uuid=institute_id).exists():
             return _error(
                 "This institute still has uploaded student lists and cannot be deleted.",
                 status.HTTP_409_CONFLICT,

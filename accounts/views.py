@@ -112,7 +112,7 @@ def _student_verification_payload(user: User) -> dict:
             "verification": None,
         }
 
-    student_id = account.student_id
+    student_id = account.student_uuid
 
     if not student_id:
         return {

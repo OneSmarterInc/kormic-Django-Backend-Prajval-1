@@ -9,7 +9,6 @@ from rest_framework.test import APIClient
 
 from agents import commons as agents_commons
 from django_api.models import FitAssessment, ResumeUpload, StudentProfile
-from django_api.services import make_student_id
 
 
 def _reset_inprocess_agent_caches():
@@ -49,9 +48,12 @@ def _register_and_enroll(client, *, role, email, password="S3curePassw0rd!", **e
 
 
 def make_student_client(email="student_a@example.com"):
+    from accounts.models import Account
+
     client = APIClient()
     _register_and_enroll(client, role="student", email=email)
-    return client, make_student_id(email)
+    uuid = str(Account.objects.get(user__email=email).student_profile.uuid)
+    return client, uuid
 
 
 def make_university_client(email="officer_a@wsu.edu", university_id="wright_state_cs", password="S3curePassw0rd!"):
@@ -69,16 +71,16 @@ def make_university_client(email="officer_a@wsu.edu", university_id="wright_stat
     from universities.identity import ensure_agent_name
     from universities.models import University
 
-    university, _created = University.objects.get_or_create(id=university_id, defaults={"name": university_id})
+    university, _created = University.objects.get_or_create(name=university_id)
     ensure_agent_name(university)
 
-    if not Account.objects.filter(university_id=university_id, role=Account.Role.UNIVERSITY).exists():
+    if not Account.objects.filter(university=university, role=Account.Role.UNIVERSITY).exists():
         admin_user = User.objects.create_user(username=email, email=email, password=password)
-        Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university_id=university_id)
+        Account.objects.create(user=admin_user, role=Account.Role.UNIVERSITY, university=university)
 
     client = APIClient()
     _enroll_totp_and_get_tokens(client, email=email, password=password)
-    return client
+    return client, str(university.uuid)
 
 
 class OwnershipTests(TestCase):
@@ -86,8 +88,8 @@ class OwnershipTests(TestCase):
         cache.clear()
         self.student_a, self.student_a_id = make_student_client(email="a@example.com")
         self.student_b, self.student_b_id = make_student_client(email="b@example.com")
-        self.officer_wsu = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
-        self.officer_franklin = make_university_client(email="officer1@franklin.edu", university_id="franklin_cs")
+        self.officer_wsu, self.wsu_id = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
+        self.officer_franklin, self.franklin_id = make_university_client(email="officer1@franklin.edu", university_id="franklin_cs")
 
     def test_student_can_create_and_read_own_profile(self):
         resp = self.student_a.post("/api/profile/", {"name": "Alice"}, format="json")
@@ -108,7 +110,8 @@ class OwnershipTests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data["student_id"], self.student_a_id)
-        self.assertFalse(StudentProfile.objects.filter(student_id=self.student_b_id).exists())
+        # student B's profile is untouched -- the write went to A's row.
+        self.assertNotEqual(StudentProfile.objects.get(uuid=self.student_b_id).name, "Alice")
 
     def test_program_and_english_score_are_saved(self):
         resp = self.student_a.post(
@@ -153,15 +156,15 @@ class OwnershipTests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_university_officer_can_read_own_dashboard(self):
-        resp = self.officer_wsu.get("/api/university/wright_state_cs/profiles/")
+        resp = self.officer_wsu.get(f"/api/university/{self.wsu_id}/profiles/")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_university_officer_cannot_read_other_universitys_dashboard(self):
-        resp = self.officer_wsu.get("/api/university/franklin_cs/profiles/")
+        resp = self.officer_wsu.get(f"/api/university/{self.franklin_id}/profiles/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_student_token_rejected_on_university_only_endpoint(self):
-        resp = self.student_a.get("/api/university/wright_state_cs/profiles/")
+        resp = self.student_a.get(f"/api/university/{self.wsu_id}/profiles/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_university_token_rejected_on_student_only_endpoint(self):
@@ -352,8 +355,8 @@ class SubResourceHistoryTests(TestCase):
         _reset_inprocess_agent_caches()
         self.student, self.student_id = make_student_client(email="d@example.com")
         self.student.post("/api/profile/", {"name": "Dave"}, format="json")
-        self.officer_wsu = make_university_client(email="officer2@wsu.edu", university_id="wright_state_cs")
-        self.officer_franklin = make_university_client(email="officer2@franklin.edu", university_id="franklin_cs")
+        self.officer_wsu, self.wsu_id = make_university_client(email="officer2@wsu.edu", university_id="wright_state_cs")
+        self.officer_franklin, self.franklin_id = make_university_client(email="officer2@franklin.edu", university_id="franklin_cs")
 
     @mock.patch("agents.resume_parser.ResumeParserAgent")
     def test_resume_upload_history_accumulates_without_overwriting_files(self, MockParser):
@@ -365,7 +368,7 @@ class SubResourceHistoryTests(TestCase):
         self.student.post("/api/profile/resume/", {"file": file1}, format="multipart")
         self.student.post("/api/profile/resume/", {"file": file2}, format="multipart")
 
-        rows = ResumeUpload.objects.filter(student__student_id=self.student_id)
+        rows = ResumeUpload.objects.filter(student__uuid=self.student_id)
         self.assertEqual(rows.count(), 2)
         file_paths = {r.file_path for r in rows}
         self.assertEqual(len(file_paths), 2)  # distinct on-disk paths, no clobbering
@@ -378,7 +381,7 @@ class SubResourceHistoryTests(TestCase):
         MockParser.return_value.parse.return_value = {"skills": ["Python"]}
         file1 = SimpleUploadedFile("resume.pdf", b"resume-bytes", content_type="application/pdf")
         self.student.post("/api/profile/resume/", {"file": file1}, format="multipart")
-        resume_id = ResumeUpload.objects.get(student__student_id=self.student_id).id
+        resume_id = ResumeUpload.objects.get(student__uuid=self.student_id).id
 
         download_resp = self.student.get(f"/api/profile/resume/{resume_id}/")
         self.assertEqual(download_resp.status_code, status.HTTP_200_OK)
@@ -432,7 +435,7 @@ class SubResourceHistoryTests(TestCase):
             upload_resp.data["profile_image_url"].endswith(f"/api/profile/{self.student_id}/image/")
         )
 
-        first_path = StudentProfile.objects.get(student_id=self.student_id).profile_image_path
+        first_path = StudentProfile.objects.get(uuid=self.student_id).profile_image_path
         self.assertNotEqual(first_path, "")
 
         download_resp = self.student.get(f"/api/profile/{self.student_id}/image/")
@@ -450,7 +453,7 @@ class SubResourceHistoryTests(TestCase):
         # Re-uploading replaces rather than accumulating, and removes the old file.
         image2 = SimpleUploadedFile("avatar2.png", b"second-image-bytes", content_type="image/png")
         self.student.post("/api/profile/image/", {"image": image2}, format="multipart")
-        second_path = StudentProfile.objects.get(student_id=self.student_id).profile_image_path
+        second_path = StudentProfile.objects.get(uuid=self.student_id).profile_image_path
         self.assertNotEqual(first_path, second_path)
         from pathlib import Path
         self.assertFalse(Path(first_path).exists())
@@ -461,7 +464,7 @@ class SubResourceHistoryTests(TestCase):
 
         delete_resp = self.student.delete(f"/api/profile/{self.student_id}/image/")
         self.assertEqual(delete_resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertEqual(StudentProfile.objects.get(student_id=self.student_id).profile_image_path, "")
+        self.assertEqual(StudentProfile.objects.get(uuid=self.student_id).profile_image_path, "")
 
         missing_resp = self.student.get(f"/api/profile/{self.student_id}/image/")
         self.assertEqual(missing_resp.status_code, status.HTTP_404_NOT_FOUND)
@@ -476,12 +479,12 @@ class SubResourceHistoryTests(TestCase):
         # agent via agents.commons.generate_fit_assessment (chat-triggered,
         # no direct student-facing POST endpoint anymore) -- create the rows
         # directly here to test the read-only history/detail views.
-        student = StudentProfile.objects.get(student_id=self.student_id)
+        student = StudentProfile.objects.get(uuid=self.student_id)
         FitAssessment.objects.create(
-            student=student, university_id="wright_state_cs", assessment={"match_tier": "target", "match_score": 70}
+            student=student, university_id=self.wsu_id, assessment={"match_tier": "target", "match_score": 70}
         )
         FitAssessment.objects.create(
-            student=student, university_id="franklin_cs", assessment={"match_tier": "target", "match_score": 70}
+            student=student, university_id=self.franklin_id, assessment={"match_tier": "target", "match_score": 70}
         )
 
         student_view = self.student.get(f"/api/assessments/{self.student_id}/")
@@ -489,10 +492,10 @@ class SubResourceHistoryTests(TestCase):
 
         wsu_view = self.officer_wsu.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(wsu_view.data["count"], 1)
-        self.assertEqual(wsu_view.data["assessments"][0]["university_id"], "wright_state_cs")
+        self.assertEqual(wsu_view.data["assessments"][0]["university_id"], self.wsu_id)
 
         franklin_view = self.officer_franklin.get(f"/api/assessments/{self.student_id}/")
         self.assertEqual(franklin_view.data["count"], 1)
-        self.assertEqual(franklin_view.data["assessments"][0]["university_id"], "franklin_cs")
+        self.assertEqual(franklin_view.data["assessments"][0]["university_id"], self.franklin_id)
 
-        self.assertEqual(FitAssessment.objects.filter(student__student_id=self.student_id).count(), 2)
+        self.assertEqual(FitAssessment.objects.filter(student__uuid=self.student_id).count(), 2)

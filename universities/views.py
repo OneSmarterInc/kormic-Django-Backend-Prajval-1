@@ -54,12 +54,12 @@ def _get_own_university(request) -> University | None:
     account = get_account(request)
     if account is None or not account.university_id:
         return None
-    return University.objects.filter(pk=account.university_id).first()
+    return account.university
 
 
 def _serialize_profile(university: University) -> Dict[str, Any]:
     return {
-        "id": university.id,
+        "id": str(university.uuid),
         "name": university.name,
         "agent_name": university.agent_name,
         "location": university.location,
@@ -78,7 +78,7 @@ def _serialize_profile(university: University) -> Dict[str, Any]:
         "not_best_fit_notes": university.not_best_fit_notes,
         "communication_style_notes": university.communication_style_notes,
         "never_do_notes": university.never_do_notes,
-        "setup_status": services.university_setup_status(university.id),
+        "setup_status": services.university_setup_status(str(university.uuid)),
         "created_at": university.created_at,
         "updated_at": university.updated_at,
     }
@@ -186,7 +186,7 @@ class UniversityProfileCompletionAPIView(APIView):
         account = get_account(request)
         if account is None or not account.university_id:
             return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
-        return Response(services.university_setup_status(account.university_id))
+        return Response(services.university_setup_status(account.university_uuid))
 
 
 class UniversityAgentNameAPIView(APIView):
@@ -215,7 +215,7 @@ class UniversityAgentNameAPIView(APIView):
             return _error("agent_name is required.")
         if len(new_name) > 100:
             return _error("agent_name must be 100 characters or fewer.")
-        if not is_agent_name_available(new_name, exclude_university_id=university.id):
+        if not is_agent_name_available(new_name, exclude_university_id=str(university.uuid)):
             return _error("This agent name is already taken. Please choose another.", status.HTTP_409_CONFLICT)
 
         university.agent_name = new_name
@@ -567,7 +567,7 @@ class KnowledgeFactListCreateAPIView(APIView):
         if account is None or not account.university_id:
             return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
 
-        entries = UniversityKnowledgeEntry.objects.filter(university_id=account.university_id)
+        entries = UniversityKnowledgeEntry.objects.filter(university_id=account.university_uuid)
 
         section = request.query_params.get("section")
         if section:
@@ -606,7 +606,7 @@ class KnowledgeFactListCreateAPIView(APIView):
             return _error(f"group must be one of: {', '.join(KnowledgeGroup.Slug.values)}.")
 
         entry = services.add_manual_knowledge_fact(
-            university.id, topic, content, confidence=confidence, group_slug=group_slug
+            str(university.uuid), topic, content, confidence=confidence, group_slug=group_slug
         )
         # add_manual_knowledge_fact returns the KB wrapper's in-memory
         # KnowledgeEntry (has .db_id, not .id) -- re-fetch the real row so
@@ -634,7 +634,7 @@ class KnowledgeSectionsAPIView(APIView):
             return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
 
         rows = (
-            UniversityKnowledgeEntry.objects.filter(university_id=account.university_id)
+            UniversityKnowledgeEntry.objects.filter(university_id=account.university_uuid)
             .values("source_type")
             .annotate(count=Count("id"))
             .order_by("-count")
@@ -666,7 +666,7 @@ class KnowledgeSourceUrlsAPIView(APIView):
             return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
 
         rows = (
-            UniversityKnowledgeEntry.objects.filter(university_id=account.university_id)
+            UniversityKnowledgeEntry.objects.filter(university_id=account.university_uuid)
             .exclude(source_url__isnull=True)
             .exclude(source_url="")
             .values("source_url")
@@ -704,7 +704,7 @@ class KnowledgeFactDetailAPIView(APIView):
             return None, _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
 
         entry = UniversityKnowledgeEntry.objects.filter(
-            id=fact_id, university_id=account.university_id
+            id=fact_id, university_id=account.university_uuid
         ).first()
 
         if entry is None:
@@ -752,12 +752,12 @@ class KnowledgeFactDetailAPIView(APIView):
                 if group_slug not in KnowledgeGroup.Slug.values:
                     return _error(f"group must be one of: {', '.join(KnowledgeGroup.Slug.values)}.")
 
-                university = University.objects.filter(pk=entry.university_id).first()
+                university = University.objects.filter(uuid=entry.university_id).first()
                 if university is not None:
                     ensure_default_groups(university)
 
                 group = KnowledgeGroup.objects.filter(
-                    university_id=entry.university_id, slug=group_slug
+                    university__uuid=entry.university_id, slug=group_slug
                 ).first()
                 if group is None:
                     return _error("Knowledge group not found.", status.HTTP_404_NOT_FOUND)
@@ -794,7 +794,7 @@ class KnowledgeGroupListAPIView(APIView):
             return _error("No university profile found for this account.", status.HTTP_404_NOT_FOUND)
 
         ensure_default_groups(university)
-        counts = escalation_counts_by_group(university.id)
+        counts = escalation_counts_by_group(str(university.uuid))
         groups = university.knowledge_groups.all()
 
         return Response({
@@ -839,7 +839,7 @@ class KnowledgeGroupDetailAPIView(APIView):
         update_fields.append("updated_at")
         group.save(update_fields=update_fields)
 
-        counts = escalation_counts_by_group(university.id)
+        counts = escalation_counts_by_group(str(university.uuid))
         return Response(_serialize_knowledge_group(group, counts))
 
 
@@ -880,8 +880,8 @@ class KnowledgeGroupFactsAPIView(APIView):
         ensure_default_groups(university)
         group = university.knowledge_groups.filter(slug=slug).first()
 
-        entries = UniversityKnowledgeEntry.objects.filter(university_id=university.id, group__slug=slug)
-        counts = escalation_counts_by_group(university.id)
+        entries = UniversityKnowledgeEntry.objects.filter(university_id=str(university.uuid), group__slug=slug)
+        counts = escalation_counts_by_group(str(university.uuid))
 
         return Response({
             "group": _serialize_knowledge_group(group, counts),
@@ -936,10 +936,10 @@ class KnowledgeGroupEscalationsAPIView(APIView):
             return error
 
         escalations = PendingQuery.objects.filter(
-            university_id=university.id, group__slug=group.slug
+            university_id=str(university.uuid), group__slug=group.slug
         ).order_by("-created_at")
 
-        counts = escalation_counts_by_group(university.id)
+        counts = escalation_counts_by_group(str(university.uuid))
 
         return Response({
             "group": _serialize_knowledge_group(group, counts),
@@ -980,7 +980,7 @@ class KnowledgeGroupEscalationNotifyAPIView(APIView):
         data = request.data or {}
         escalation_ids = data.get("escalation_ids")
 
-        escalations_qs = PendingQuery.objects.filter(university_id=university.id, group__slug=group.slug)
+        escalations_qs = PendingQuery.objects.filter(university_id=str(university.uuid), group__slug=group.slug)
         if escalation_ids not in (None, ""):
             if not isinstance(escalation_ids, list) or not all(isinstance(i, int) for i in escalation_ids):
                 return _error("escalation_ids must be a list of integer ids.")

@@ -289,7 +289,7 @@ def serialize_check(check: VerificationCheck, include_items: bool = True) -> Dic
         "status": check.status,
         "verified": check.status == VerificationCheck.Status.VERIFIED,
         "message": _status_message(check.status, open_count),
-        "student_id": check.student.student_id,
+        "student_id": str(check.student.uuid),
         "missing_sources": check.missing_sources,
         "pending_items_count": open_count,
         "items_summary": _summarize_items(items),
@@ -311,7 +311,7 @@ def run_verification(student_id: str, user: Any = None) -> Dict[str, Any]:
     -- there is no caching layer -- so calling this again after any
     reupload or profile edit IS the "reanalyze" action.
     """
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
 
     if profile is None:
         return {
@@ -398,7 +398,7 @@ def list_items(student_id: str, filter_status: str = "open") -> Dict[str, Any]:
     controls which items populate the `items` list itself.
     """
     empty_summary = {"open": 0, "confirmed": 0, "ignored": 0, "clarified": 0, "auto_cleared": 0, "superseded": 0}
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
     if profile is None:
         return {"items": [], "summary": empty_summary}
 
@@ -430,7 +430,7 @@ def resolve_item(*, student_id: str, item_id: int, action: str, note: str = "") 
     except VerificationItem.DoesNotExist:
         raise ItemNotFound()
 
-    if item.verification_check.student.student_id != student_id:
+    if str(item.verification_check.student.uuid) != student_id:
         raise ItemNotOwned()
     if item.is_resolved:
         raise ItemAlreadyResolved()

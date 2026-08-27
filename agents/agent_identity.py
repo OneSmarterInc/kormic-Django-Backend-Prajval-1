@@ -30,7 +30,8 @@ def is_agent_name_available(name: str, exclude_student_id: Optional[str] = None)
 
     query = StudentProfile.objects.filter(agent_name__iexact=name)
     if exclude_student_id:
-        query = query.exclude(student_id=exclude_student_id)
+        # exclude_student_id is the public uuid string, not the int PK.
+        query = query.exclude(uuid=exclude_student_id)
 
     return not query.exists()
 
@@ -65,6 +66,6 @@ def ensure_agent_name(profile) -> str:
 
     from agents.identity_registry import student_identity
 
-    student_identity(profile.student_id, profile.agent_name)
+    student_identity(str(profile.uuid), profile.agent_name)
 
     return profile.agent_name

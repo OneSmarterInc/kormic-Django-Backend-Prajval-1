@@ -24,6 +24,8 @@ UPLOADS_DIR.mkdir(exist_ok=True)
 # Anything in a saved profile dict that isn't one of these keys (plus
 # student_id/created_at/updated_at, handled specially) is preserved in
 # `extra_data` so no data from the agents is ever dropped.
+# NOTE: the flat-dict key stays "student_id" for API stability; its value is
+# now StudentProfile.uuid (a random UUID string), never an email-derived slug.
 PROFILE_FIELDS: List[str] = [
     "name", "email", "country", "institution", "major", "program", "graduation_year",
     "gpa", "gpa_scale", "gpa_text",
@@ -46,11 +48,14 @@ PROFILE_FIELDS: List[str] = [
 ]
 
 
-def make_student_id(value: str) -> str:
-    cleaned = str(value or "student").strip().lower()
-    cleaned = re.sub(r"[^a-z0-9]+", "_", cleaned)
-    cleaned = cleaned.strip("_")
-    return cleaned or "student"
+def as_uuid(value: Any) -> Optional[str]:
+    """Return `value` as a canonical UUID string, or None if it isn't a
+    well-formed UUID. Lets lookups on the uuid columns treat a malformed or
+    unknown identifier as "not found" instead of raising ValidationError."""
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, TypeError, AttributeError):
+        return None
 
 
 def _profile_to_dict(profile: StudentProfile) -> Dict[str, Any]:
@@ -59,7 +64,7 @@ def _profile_to_dict(profile: StudentProfile) -> Dict[str, Any]:
     for field in PROFILE_FIELDS:
         data[field] = getattr(profile, field)
 
-    data["student_id"] = profile.student_id
+    data["student_id"] = str(profile.uuid)
     data["created_at"] = profile.created_at.strftime("%Y-%m-%d %H:%M:%S")
     data["updated_at"] = profile.updated_at.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -92,13 +97,14 @@ def _apply_dict_to_profile(profile: StudentProfile, data: Dict[str, Any]) -> Non
 
 def get_profile_path(student_id: str) -> str:
     """Kept for backward-compatible informational responses; profiles are DB-backed now."""
-    student_id = make_student_id(student_id)
     return f"db://student_profiles/{student_id}"
 
 
 def load_profile_data(student_id: str) -> Dict[str, Any]:
-    student_id = make_student_id(student_id)
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    profile = (
+        StudentProfile.objects.filter(uuid=student_id).first()
+        if as_uuid(student_id) else None
+    )
 
     if profile is None:
         return {
@@ -116,11 +122,10 @@ def load_profile_data(student_id: str) -> Dict[str, Any]:
 
 
 def save_profile_data(student_id: str, data: Dict[str, Any]) -> str:
-    student_id = make_student_id(student_id)
     data = dict(data or {})
     data["student_id"] = student_id
 
-    profile, _ = StudentProfile.objects.get_or_create(student_id=student_id)
+    profile, _ = StudentProfile.objects.get_or_create(uuid=student_id)
     _apply_dict_to_profile(profile, data)
     profile.save()
 
@@ -170,8 +175,13 @@ class ProfileValidationError(ValueError):
 def create_or_update_profile(validated_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(validated_data)
     raw_student_id = data.get("student_id")
-    name = data.get("name") or raw_student_id or "Student"
-    student_id = make_student_id(raw_student_id or name)
+    name = data.get("name") or "Student"
+
+    if raw_student_id:
+        student_id = str(raw_student_id)
+    else:
+        # No caller id supplied -- mint a fresh profile and use its uuid.
+        student_id = str(StudentProfile.objects.create().uuid)
 
     profile = load_profile_data(student_id)
     profile["student_id"] = student_id
@@ -222,9 +232,7 @@ def create_or_update_profile(validated_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_profile(student_id: str) -> Dict[str, Any]:
-    student_id = make_student_id(student_id)
-
-    if not StudentProfile.objects.filter(student_id=student_id).exists():
+    if not as_uuid(student_id) or not StudentProfile.objects.filter(uuid=student_id).exists():
         raise FileNotFoundError(f"Profile not found for student_id: {student_id}")
 
     return load_profile_data(student_id)
@@ -743,8 +751,9 @@ def format_profile_response(profile: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_profile_image_path(student_id: str) -> Optional[str]:
-    student_id = make_student_id(student_id)
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    if not as_uuid(student_id):
+        return None
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
 
     if profile is None or not profile.profile_image_path:
         return None
@@ -760,8 +769,7 @@ def upload_profile_image(student_id: str, uploaded_file) -> Dict[str, Any]:
     history -- each upload replaces the previous one, and the old file is
     removed from disk.
     """
-    student_id = make_student_id(student_id)
-    profile, _ = StudentProfile.objects.get_or_create(student_id=student_id)
+    profile, _ = StudentProfile.objects.get_or_create(uuid=student_id)
 
     old_path = profile.profile_image_path
     if old_path and Path(old_path).exists():
@@ -775,8 +783,9 @@ def upload_profile_image(student_id: str, uploaded_file) -> Dict[str, Any]:
 
 
 def delete_profile_image(student_id: str) -> bool:
-    student_id = make_student_id(student_id)
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    if not as_uuid(student_id):
+        return False
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
 
     if profile is None or not profile.profile_image_path:
         return False
@@ -805,8 +814,7 @@ CHAT_ATTACHMENT_MAX_PER_MESSAGE = 5
 
 
 def save_uploaded_file(student_id: str, uploaded_file, folder_name: str) -> Path:
-    student_id = make_student_id(student_id)
-    target_dir = UPLOADS_DIR / folder_name / student_id
+    target_dir = UPLOADS_DIR / folder_name / str(student_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     safe_name = Path(uploaded_file.name).name
@@ -903,7 +911,6 @@ def merge_resume_data_into_profile(student_id: str, extracted_data: Dict[str, An
 
 
 def parse_resume(student_id: str, uploaded_file) -> Dict[str, Any]:
-    student_id = make_student_id(student_id)
     file_path = save_uploaded_file(student_id, uploaded_file, "resumes")
 
     from agents.resume_parser import ResumeParserAgent
@@ -913,7 +920,7 @@ def parse_resume(student_id: str, uploaded_file) -> Dict[str, Any]:
     updated_profile = merge_resume_data_into_profile(student_id, extracted_data)
 
     resume_row = ResumeUpload.objects.create(
-        student=StudentProfile.objects.get(student_id=student_id),
+        student=StudentProfile.objects.get(uuid=student_id),
         file_path=str(file_path),
         original_filename=uploaded_file.name,
         extracted_data=extracted_data,
@@ -932,7 +939,6 @@ def analyze_github(student_id: str) -> Dict[str, Any]:
     Analyzes the student's own OAuth-connected GitHub account only -- there
     is no github_url parameter anymore.
     """
-    student_id = make_student_id(student_id)
     profile = load_profile_data(student_id)
 
     from accounts.github_oauth import (
@@ -991,7 +997,7 @@ def analyze_github(student_id: str) -> Dict[str, Any]:
     save_profile_data(student_id, profile)
 
     GitHubAnalysis.objects.create(
-        student=StudentProfile.objects.get(student_id=student_id),
+        student=StudentProfile.objects.get(uuid=student_id),
         github_url=github_url,
         result=github_result,
     )
@@ -1009,8 +1015,9 @@ def record_university_interest(student_id: str, university_id: str, source: str)
 
     from django_api.models import UniversityInterestEvent
 
-    student_id = make_student_id(student_id)
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
+    if not as_uuid(student_id):
+        return
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
     if profile is None:
         return
 
@@ -1028,11 +1035,11 @@ def student_has_university_interest(student_id: str, university_id: str) -> bool
     """
     from django_api.models import UniversityInterestEvent
 
-    if not student_id or not university_id:
+    if not as_uuid(student_id) or not university_id:
         return False
 
     return UniversityInterestEvent.objects.filter(
-        university_id=university_id, student__student_id=make_student_id(student_id)
+        university_id=university_id, student__uuid=student_id
     ).exists()
 
 
@@ -1045,7 +1052,7 @@ def get_priority_tier_bounds(university_id: str) -> Dict[str, int]:
     yields usable values for the other bands."""
     from universities.models import University
 
-    university = University.objects.filter(pk=university_id).first()
+    university = University.objects.filter(uuid=university_id).first()
     configured = (university.priority_tier_bounds if university else None) or {}
     return {**DEFAULT_PRIORITY_TIER_BOUNDS, **configured}
 
@@ -1092,7 +1099,7 @@ def get_shortlisted_profiles(
             tier_floor = {**bounds, "unranked": 0}
             min_score = min(tier_floor.get(tier, 0) for tier in priority_tiers)
         else:
-            university = University.objects.filter(pk=university_id).first()
+            university = University.objects.filter(uuid=university_id).first()
             min_score = university.min_fit_score_threshold if university else 40
 
     interested_student_pks = (
@@ -1127,7 +1134,7 @@ def get_shortlisted_profiles(
             continue
 
         shortlisted.append({
-            "student_id": assessment_row.student.student_id,
+            "student_id": str(assessment_row.student.uuid),
             "assessment": assessment_row.assessment,
             "match_score": match_score,
             "priority_tier": tier,
@@ -1149,8 +1156,6 @@ def get_priority_tier_counts(university_id: str) -> Dict[str, int]:
 
 
 def analyze_linkedin(student_id: str, uploaded_images: List[Any]) -> Dict[str, Any]:
-    student_id = make_student_id(student_id)
-
     image_paths = []
     for image in uploaded_images:
         saved_path = save_uploaded_file(student_id, image, "linkedin")
@@ -1186,7 +1191,7 @@ def analyze_linkedin(student_id: str, uploaded_images: List[Any]) -> Dict[str, A
     save_profile_data(student_id, profile)
 
     analysis = LinkedInAnalysis.objects.create(
-        student=StudentProfile.objects.get(student_id=student_id),
+        student=StudentProfile.objects.get(uuid=student_id),
         image_paths=image_paths,
         extracted=extracted,
     )

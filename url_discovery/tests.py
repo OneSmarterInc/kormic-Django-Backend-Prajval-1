@@ -13,8 +13,10 @@ from url_discovery.models import DiscoveredUrl, DiscoveryClusterApproval, Discov
 
 class ClusterApprovalTests(TestCase):
     def setUp(self):
-        self.client = make_university_client(email="officer_cluster@wsu.edu", university_id="cluster_state")
-        self.university = University.objects.get(id="cluster_state")
+        self.client, self.university_id = make_university_client(
+            email="officer_cluster@wsu.edu", university_id="cluster_state"
+        )
+        self.university = University.objects.get(name="cluster_state")
         self.job = DiscoveryJob.objects.create(
             university=self.university,
             base_url="https://cluster-state.edu/",

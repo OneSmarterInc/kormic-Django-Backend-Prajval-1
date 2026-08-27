@@ -10,10 +10,13 @@ from rest_framework import status
 from rest_framework.test import APIClient
 
 from accounts.models import Account, TOTPDevice
-from django_api.services import make_student_id
 
 STUDENT_EMAIL = "student1@example.com"
-STUDENT_ID = make_student_id(STUDENT_EMAIL)
+
+
+def sid(email=STUDENT_EMAIL):
+    """The student_profile uuid for a registered account, as a string."""
+    return str(Account.objects.get(user__email=email).student_profile.uuid)
 
 
 def register(client, **overrides):
@@ -48,13 +51,14 @@ class AuthFlowTests(TestCase):
     def test_register_student_success(self):
         resp = register(self.client)
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(Account.objects.get(student_id=STUDENT_ID).role, "student")
+        self.assertEqual(Account.objects.get(user__email=STUDENT_EMAIL).role, "student")
 
     def test_register_student_ignores_client_supplied_student_id(self):
         resp = register(self.client, student_id="someone-elses-id")
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data["user"]["student_id"], STUDENT_ID)
-        self.assertFalse(Account.objects.filter(student_id="someone-elses-id").exists())
+        # The server mints its own uuid; a client-supplied value is ignored.
+        self.assertEqual(resp.data["user"]["student_id"], sid())
+        self.assertNotEqual(resp.data["user"]["student_id"], "someone-elses-id")
 
     def test_register_endpoint_rejects_university_role(self):
         # Universities never self-register -- only a superuser can create one,
@@ -72,12 +76,13 @@ class AuthFlowTests(TestCase):
         resp = register(self.client)
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
-    def test_register_duplicate_student_id_rejected(self):
-        # Different emails that normalize (via make_student_id) to the same slug.
-        register(self.client, email="student.one@example.com")
-        resp = register(self.client, email="student+one@example.com")
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn("student_id", resp.data)
+    def test_similar_emails_get_distinct_student_ids(self):
+        # Identifiers are random uuids now -- no email-derived slug collision.
+        r1 = register(self.client, email="student.one@example.com")
+        r2 = register(self.client, email="student+one@example.com")
+        self.assertEqual(r1.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(r2.status_code, status.HTTP_201_CREATED)
+        self.assertNotEqual(r1.data["user"]["student_id"], r2.data["user"]["student_id"])
 
     def test_login_unenrolled_user_gets_restricted_token(self):
         register(self.client)
@@ -91,7 +96,7 @@ class AuthFlowTests(TestCase):
         register(self.client)
         access = login(self.client).data["access"]
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-        resp = self.client.get(f"/api/profile/{STUDENT_ID}/")
+        resp = self.client.get(f"/api/profile/{sid()}/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_restricted_token_allows_enroll_and_verify_enrollment(self):
@@ -101,7 +106,7 @@ class AuthFlowTests(TestCase):
         self.assertEqual(enroll_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(verify_resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(verify_resp.data["backup_codes"]), 10)
-        device = TOTPDevice.objects.get(user__account__student_id=STUDENT_ID)
+        device = TOTPDevice.objects.get(user__email=STUDENT_EMAIL)
         self.assertIsNotNone(device.confirmed_at)
 
     def test_double_enroll_call_returns_same_secret(self):
@@ -120,7 +125,7 @@ class AuthFlowTests(TestCase):
         first = self.client.post("/api/auth/totp/enroll/")
         second = self.client.post("/api/auth/totp/enroll/")
         self.assertEqual(first.data["secret"], second.data["secret"])
-        self.assertEqual(TOTPDevice.objects.filter(user__account__student_id=STUDENT_ID).count(), 1)
+        self.assertEqual(TOTPDevice.objects.filter(user__email=STUDENT_EMAIL).count(), 1)
 
         # A code generated from the FIRST response's secret (the one the
         # student's authenticator app actually scanned) must still verify.
@@ -153,8 +158,10 @@ class AuthFlowTests(TestCase):
         enroll_and_confirm(self.client, access)
         # Reuse the SAME pre-enrollment token, no re-login.
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
-        resp = self.client.get(f"/api/profile/{STUDENT_ID}/")
-        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)  # profile gate passes, just no profile yet
+        resp = self.client.get(f"/api/profile/{sid()}/")
+        # Registration now creates the StudentProfile row, so the gate passes
+        # and the (blank) profile is returned.
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_login_enrolled_user_gets_mfa_token_not_direct_tokens(self):
         register(self.client)
@@ -284,7 +291,9 @@ class AuthFlowTests(TestCase):
 
         resp = self.client.get("/api/auth/me/")
         onboarding = resp.data["onboarding"]
-        self.assertFalse(onboarding["profile_exists"])
+        # The profile row is created at registration now; the remaining
+        # onboarding steps are still outstanding.
+        self.assertTrue(onboarding["profile_exists"])
         self.assertFalse(onboarding["resume_uploaded"])
         self.assertFalse(onboarding["github_connected"])
         self.assertFalse(onboarding["linkedin_connected"])
@@ -345,12 +354,23 @@ class ForgotPasswordFlowTests(TestCase):
         mail.outbox = []
 
     def _make_user(self, email="student1@example.com", password="S3curePassw0rd!", role=Account.Role.STUDENT):
+        from django_api.models import StudentProfile
+        from universities.models import University
+
         user = User.objects.create_user(username=email, email=email, password=password)
         Account.objects.create(
             user=user,
             role=role,
-            student_id=make_student_id(email) if role == Account.Role.STUDENT else None,
-            university_id="wsu" if role == Account.Role.UNIVERSITY else None,
+            student_profile=(
+                StudentProfile.objects.create(email=email)
+                if role == Account.Role.STUDENT
+                else None
+            ),
+            university=(
+                University.objects.create(name="Western State University")
+                if role == Account.Role.UNIVERSITY
+                else None
+            ),
         )
         return user
 

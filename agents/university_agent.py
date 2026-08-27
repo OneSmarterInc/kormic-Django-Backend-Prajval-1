@@ -61,7 +61,7 @@ class UniversityAgent:
         from universities.services import build_persona_dict
 
         try:
-            university = University.objects.get(pk=university_id)
+            university = University.objects.get(uuid=university_id)
         except University.DoesNotExist:
             raise ValueError(f"Unknown university: {university_id}")
 

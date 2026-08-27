@@ -17,8 +17,8 @@ from django_api.models import (
 
 @admin.register(StudentProfile)
 class StudentProfileAdmin(admin.ModelAdmin):
-    list_display = ("student_id", "name", "email", "institution", "major", "updated_at")
-    search_fields = ("student_id", "name", "email", "institution")
+    list_display = ("uuid", "name", "email", "institution", "major", "updated_at")
+    search_fields = ("name", "email", "institution")
 
 
 @admin.register(IntakeSession)
@@ -44,32 +44,31 @@ class ChatAttachmentAdmin(admin.ModelAdmin):
 @admin.register(ResumeUpload)
 class ResumeUploadAdmin(admin.ModelAdmin):
     list_display = ("student", "original_filename", "created_at")
-    search_fields = ("student__student_id", "original_filename")
+    search_fields = ("original_filename",)
 
 
 @admin.register(GitHubAnalysis)
 class GitHubAnalysisAdmin(admin.ModelAdmin):
     list_display = ("student", "github_url", "created_at")
-    search_fields = ("student__student_id", "github_url")
+    search_fields = ("github_url",)
 
 
 @admin.register(LinkedInAnalysis)
 class LinkedInAnalysisAdmin(admin.ModelAdmin):
     list_display = ("student", "created_at")
-    search_fields = ("student__student_id",)
+    search_fields = ()
 
 
 @admin.register(FitAssessment)
 class FitAssessmentAdmin(admin.ModelAdmin):
     list_display = ("student", "university_id", "created_at")
-    search_fields = ("student__student_id", "university_id")
-    list_filter = ("university_id",)
+    search_fields = ("university_id",)
 
 
 @admin.register(RoadmapVersion)
 class RoadmapVersionAdmin(admin.ModelAdmin):
     list_display = ("student", "created_at")
-    search_fields = ("student__student_id",)
+    search_fields = ()
 
 
 @admin.register(AgentIdentity)

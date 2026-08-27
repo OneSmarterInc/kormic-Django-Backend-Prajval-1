@@ -5,11 +5,15 @@ institutions) that upload student lists for the claim flow -- distinct from
 agent, personas, and fit scoring. An institute never gets an agent; it only
 ever needs an identity for provenance and one admin login to upload lists.
 """
+import uuid
+
 from django.db import models
 
 
 class Institute(models.Model):
-    id = models.SlugField(primary_key=True, max_length=255)
+    # Public, non-guessable identifier used in API URLs and cross-table string
+    # references. The integer auto `id` stays internal. Replaces the old slug PK.
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
     name = models.CharField(max_length=500)
 
     contact_email = models.CharField(max_length=255, blank=True, default="")

@@ -157,13 +157,13 @@ def upload_list(request):
 
     # Ownership: an institute account may only upload on behalf of itself.
     # Only a superuser may upload for an institute_id other than their own.
-    if role == Account.Role.INSTITUTE and account.institute_id != institute_id:
+    if role == Account.Role.INSTITUTE and account.institute_uuid != institute_id:
         return Response(
             {"error": "you may only upload lists for your own institute"},
             status=status.HTTP_403_FORBIDDEN,
         )
 
-    institute = Institute.objects.filter(pk=institute_id).first()
+    institute = Institute.objects.filter(uuid=institute_id).first()
     if institute is None:
         return Response({"error": "no registered institute with that institute_id"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -208,7 +208,7 @@ def upload_list(request):
         seen.add(email)
 
         existing = (
-            ListedStudent.objects.filter(institute_id=institute.id, email__iexact=email)
+            ListedStudent.objects.filter(institute_id=str(institute.uuid), email__iexact=email)
             .order_by("-created_at")
             .first()
         )
@@ -224,7 +224,7 @@ def upload_list(request):
             existing.save()
         else:
             ListedStudent.objects.create(
-                source_list=source_list, institute_id=institute.id, **row
+                source_list=source_list, institute_id=str(institute.uuid), **row
             )
         accepted += 1
 
@@ -286,11 +286,11 @@ def list_lists(request):
 
     qs = UniversityStudentList.objects.select_related("institute")
     if account.role == Account.Role.INSTITUTE:
-        qs = qs.filter(institute_id=account.institute_id)
+        qs = qs.filter(institute=account.institute_id)
     else:
         institute_id = request.query_params.get("institute_id")
         if institute_id:
-            qs = qs.filter(institute_id=institute_id)
+            qs = qs.filter(institute__uuid=institute_id)
 
     status_counts_by_list = {
         row["source_list_id"]: row
@@ -308,7 +308,7 @@ def list_lists(request):
         lists.append(
             {
                 "list_id": lst.id,
-                "institute_id": lst.institute_id,
+                "institute_id": str(lst.institute.uuid),
                 "institute_name": lst.institute.name,
                 "contact_name": lst.contact_name,
                 "contact_email": lst.contact_email,
@@ -630,10 +630,14 @@ def confirm_claim(request):
             )
 
     from django_api.models import StudentProfile
-    from django_api.services import make_student_id
 
-    student_id = make_student_id(row.email)
-    profile, created = StudentProfile.objects.get_or_create(student_id=student_id)
+    # Match an existing profile by claim-anchor email (the student may have
+    # already self-registered); otherwise mint a fresh one with an auto uuid.
+    profile = StudentProfile.objects.filter(email__iexact=row.email).order_by("created_at").first()
+    created = profile is None
+    if created:
+        profile = StudentProfile(email=row.email)
+    student_id = str(profile.uuid)
 
     # Email is the claim anchor (proven via OTP) and is not student-editable
     # in this flow -- always apply it.

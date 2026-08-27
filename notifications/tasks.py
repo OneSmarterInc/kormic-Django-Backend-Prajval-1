@@ -238,11 +238,15 @@ def run_proactive_checkins_task(cooldown_days: int | None = None) -> Dict[str, i
     # Only students who've actually engaged (have a real Account + have
     # touched their profile) are candidates -- an empty StudentProfile row
     # with no name has nothing worth commenting on and no account to reach.
-    student_ids = list(
-        StudentProfile.objects.exclude(name="")
-        .filter(student_id__in=Account.objects.values_list("student_id", flat=True))
-        .values_list("student_id", flat=True)
-    )
+    linked_profile_ids = Account.objects.filter(
+        student_profile__isnull=False
+    ).values_list("student_profile_id", flat=True)
+    student_ids = [
+        str(u)
+        for u in StudentProfile.objects.exclude(name="")
+        .filter(id__in=linked_profile_ids)
+        .values_list("uuid", flat=True)
+    ]
 
     batches = 0
     for i in range(0, len(student_ids), batch_size):

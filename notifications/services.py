@@ -51,7 +51,11 @@ def notify_agent_reply(*, student_id: str, agent_name: str, reply: str) -> Optio
     queues the push, so the student is notified even if they backgrounded or
     closed the app while the reply was being generated.
     """
-    account = Account.objects.filter(student_id=student_id).first()
+    from django_api.services import as_uuid
+
+    if not as_uuid(student_id):
+        return None
+    account = Account.objects.filter(student_profile__uuid=student_id).first()
     if account is None:
         return None
 
@@ -87,7 +91,11 @@ def send_agent_message(
     pushes into one Expo call themselves (see
     notifications.tasks.run_proactive_checkin_batch_task).
     """
-    account = Account.objects.filter(student_id=student_id).first()
+    from django_api.services import as_uuid
+
+    if not as_uuid(student_id):
+        return None
+    account = Account.objects.filter(student_profile__uuid=student_id).first()
     if account is None:
         return None
 

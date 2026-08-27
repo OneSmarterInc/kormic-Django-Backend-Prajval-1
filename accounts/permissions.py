@@ -71,7 +71,7 @@ class ScopedToOwnStudentId(BasePermission):
         if student_id is None:
             return True
         account = get_account(request)
-        return account is not None and account.student_id == student_id
+        return account is not None and account.student_uuid == str(student_id)
 
 
 class ScopedToOwnUniversityId(BasePermission):
@@ -82,7 +82,7 @@ class ScopedToOwnUniversityId(BasePermission):
         if university_id is None:
             return True
         account = get_account(request)
-        return account is not None and account.university_id == university_id
+        return account is not None and account.university_uuid == str(university_id)
 
 
 class ScopedToOwnInstituteId(BasePermission):
@@ -93,4 +93,4 @@ class ScopedToOwnInstituteId(BasePermission):
         if institute_id is None:
             return True
         account = get_account(request)
-        return account is not None and account.institute_id == institute_id
+        return account is not None and account.institute_uuid == str(institute_id)

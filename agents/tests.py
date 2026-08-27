@@ -36,8 +36,9 @@ class UniversityAgentPartialEscalationTests(TestCase):
     """
 
     def setUp(self):
-        University.objects.create(id="write_state", name="Write State", agent_name="Nova2")
-        self.agent = UniversityAgent("write_state", auto_scrape=False)
+        u = University.objects.create(name="Write State", agent_name="Nova2")
+        self.university_id = str(u.uuid)
+        self.agent = UniversityAgent(self.university_id, auto_scrape=False)
         self.agent.kb.store(
             topic="Application deadlines",
             content="Fall 2025 deadline is March 1; Spring 2026 is October 10.",
@@ -63,7 +64,7 @@ class UniversityAgentPartialEscalationTests(TestCase):
         self.assertEqual(result["unsupported_topics"], ["funding"])
 
         query = PendingQuery.objects.get(id=result["pending_query"]["query_id"])
-        self.assertEqual(query.university_id, "write_state")
+        self.assertEqual(query.university_id, self.university_id)
         self.assertIn("funding", query.question.lower())
 
     @mock.patch("agents.university_agent._get_anthropic_client")
@@ -90,8 +91,8 @@ class PendingQueryConfidenceTests(TestCase):
     """
 
     def setUp(self):
-        University.objects.create(id="hard_state", name="Hard State", agent_name="Nova3")
-        self.agent = UniversityAgent("hard_state", auto_scrape=False)
+        u = University.objects.create(name="Hard State", agent_name="Nova3")
+        self.agent = UniversityAgent(str(u.uuid), auto_scrape=False)
 
     @mock.patch("agents.university_agent._get_anthropic_client")
     def test_different_confidence_scores_persist_distinctly_on_the_escalation(self, mock_client):
@@ -144,8 +145,8 @@ class UniversityAgentOfficerGuardrailTests(TestCase):
     """
 
     def setUp(self):
-        University.objects.create(id="franklin_university", name="Franklin University", agent_name="Sol")
-        self.agent = UniversityAgent("franklin_university", auto_scrape=False)
+        u = University.objects.create(name="Franklin University", agent_name="Sol")
+        self.agent = UniversityAgent(str(u.uuid), auto_scrape=False)
 
     @mock.patch("agents.university_agent._get_anthropic_client")
     def test_low_confidence_officer_question_does_not_create_pending_query(self, mock_client):
@@ -211,13 +212,13 @@ class UniversityAgentEscalationRoutingTests(TestCase):
     """
 
     def setUp(self):
-        self.university = University.objects.create(id="wsu_money", name="Write State", agent_name="Nova3")
+        self.university = University.objects.create(name="Write State", agent_name="Nova3")
         ensure_default_groups(self.university)
         self.money_group = self.university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
         self.money_group.escalation_contact_name = "Bursar Office"
         self.money_group.escalation_contact_email = "bursar@wsu.edu"
         self.money_group.save()
-        self.agent = UniversityAgent("wsu_money", auto_scrape=False)
+        self.agent = UniversityAgent(str(self.university.uuid), auto_scrape=False)
 
     @mock.patch("agents.university_agent._get_anthropic_client")
     def test_escalation_routes_to_matching_group_contact(self, mock_client):
@@ -243,8 +244,8 @@ class UniversityAgentEscalationRoutingTests(TestCase):
 
     @mock.patch("agents.university_agent._get_anthropic_client")
     def test_escalation_still_created_when_no_groups_configured(self, mock_client):
-        University.objects.create(id="no_groups_u", name="No Groups University", agent_name="Nova6")
-        agent = UniversityAgent("no_groups_u", auto_scrape=False)
+        u = University.objects.create(name="No Groups University", agent_name="Nova6")
+        agent = UniversityAgent(str(u.uuid), auto_scrape=False)
 
         mock_client.return_value.messages.create.return_value = _fake_response({
             "answer": "I don't know.",
@@ -268,18 +269,19 @@ class AgentIdentityAndConversationLogTests(TestCase):
     """
 
     def setUp(self):
-        University.objects.create(id="identity_u", name="Identity University", agent_name="Nova4")
+        self.university = University.objects.create(name="Identity University", agent_name="Nova4")
+        self.university_id = str(self.university.uuid)
 
     def test_university_agent_construction_creates_birth_record(self):
-        UniversityAgent("identity_u", auto_scrape=False)
+        UniversityAgent(self.university_id, auto_scrape=False)
 
-        identity = AgentIdentity.objects.get(owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id="identity_u")
+        identity = AgentIdentity.objects.get(owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id=self.university_id)
         self.assertEqual(identity.agent_name, "Nova4")
 
     def test_log_conversation_creates_row_and_lazily_creates_identities(self):
         log = identity_registry.log_conversation(
             student_id="student_abc",
-            university_id="identity_u",
+            university_id=self.university_id,
             question="What is the deadline?",
             answer="March 1.",
             knowledge_source="conversation",
@@ -293,7 +295,7 @@ class AgentIdentityAndConversationLogTests(TestCase):
         )
         self.assertTrue(
             AgentIdentity.objects.filter(
-                owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id="identity_u"
+                owner_type=AgentIdentity.OwnerType.UNIVERSITY, owner_id=self.university_id
             ).exists()
         )
 

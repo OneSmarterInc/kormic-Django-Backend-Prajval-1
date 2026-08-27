@@ -61,7 +61,6 @@ from django_api.services import (
     load_profile_data,
     save_chat_attachment,
     save_profile_data,
-    make_student_id,
     student_has_university_interest,
     upload_profile_image,
     ProfileValidationError,
@@ -290,7 +289,7 @@ class ProfileCreateUpdateAPIView(APIView):
 
         try:
             data = dict(serializer.validated_data)
-            data["student_id"] = request.user.account.student_id
+            data["student_id"] = request.user.account.student_uuid
             result = create_or_update_profile(data)
             return Response(
                 {
@@ -345,7 +344,7 @@ class ProfileImageUploadAPIView(APIView):
     permission_classes = STUDENT_PERMISSIONS
 
     def post(self, request):
-        student_id = request.user.account.student_id
+        student_id = request.user.account.student_uuid
         image = request.FILES.get("image")
 
         if not image:
@@ -380,7 +379,7 @@ class ProfileImageDetailAPIView(APIView):
 
     def get(self, request, student_id):
         account = get_account(request)
-        if account.role == "student" and account.student_id != student_id:
+        if account.role == "student" and account.student_uuid != student_id:
             return api_error("You may only access your own profile picture.", status.HTTP_403_FORBIDDEN)
 
         image_path = get_profile_image_path(student_id)
@@ -396,7 +395,7 @@ class ProfileImageDetailAPIView(APIView):
 
     def delete(self, request, student_id):
         account = get_account(request)
-        if account.role != "student" or account.student_id != student_id:
+        if account.role != "student" or account.student_uuid != student_id:
             return api_error("You may only delete your own profile picture.", status.HTTP_403_FORBIDDEN)
 
         removed = delete_profile_image(student_id)
@@ -416,7 +415,7 @@ class ResumeUploadAPIView(APIView):
 
     def post(self, request):
         data = request.data.copy()
-        data["student_id"] = request.user.account.student_id
+        data["student_id"] = request.user.account.student_uuid
         serializer = ResumeUploadSerializer(data=data)
 
         if not serializer.is_valid():
@@ -459,7 +458,7 @@ class ResumeDetailAPIView(APIView):
         except ResumeUpload.DoesNotExist:
             return None, api_error("Resume not found.", status.HTTP_404_NOT_FOUND)
 
-        if resume.student.student_id != request.user.account.student_id:
+        if str(resume.student.uuid) != request.user.account.student_uuid:
             return None, api_error("You may only access your own resumes.", status.HTTP_403_FORBIDDEN)
 
         return resume, None
@@ -505,7 +504,7 @@ class GitHubAnalyzeAPIView(APIView):
     permission_classes = STUDENT_PERMISSIONS
 
     def post(self, request):
-        student_id = request.user.account.student_id
+        student_id = request.user.account.student_uuid
 
         try:
             result = analyze_github(student_id=student_id)
@@ -558,7 +557,7 @@ class LinkedInAnalyzeAPIView(APIView):
     permission_classes = STUDENT_PERMISSIONS
 
     def post(self, request):
-        student_id = request.user.account.student_id
+        student_id = request.user.account.student_uuid
         images = request.FILES.getlist("images")
 
         if not images:
@@ -595,7 +594,7 @@ class LinkedInImageDetailAPIView(APIView):
         except LinkedInAnalysis.DoesNotExist:
             return api_error("LinkedIn analysis not found.", status.HTTP_404_NOT_FOUND)
 
-        if analysis.student.student_id != request.user.account.student_id:
+        if str(analysis.student.uuid) != request.user.account.student_uuid:
             return api_error("You may only access your own LinkedIn images.", status.HTTP_403_FORBIDDEN)
 
         image_paths = analysis.image_paths or []
@@ -663,10 +662,10 @@ def map_intake_answer(field_key: str, answer: str) -> Dict[str, Any]:
 @api_view(["POST"])
 @permission_classes(STUDENT_PERMISSIONS)
 def profile_intake_chat(request):
-    student_id = request.user.account.student_id
+    student_id = request.user.account.student_uuid
     answer = request.data.get("answer", "")
 
-    key = make_student_id(student_id)
+    key = student_id
     session = load_intake_session(key)
 
     if session is None or answer == "":
@@ -755,16 +754,16 @@ class AgentNameAPIView(APIView):
     def get(self, request):
         from agents.agent_identity import ensure_agent_name
 
-        student_id = request.user.account.student_id
-        profile, _ = StudentProfile.objects.get_or_create(student_id=make_student_id(student_id))
+        student_id = request.user.account.student_uuid
+        profile, _ = StudentProfile.objects.get_or_create(uuid=student_id)
         agent_name = ensure_agent_name(profile)
         return Response({"agent_name": agent_name})
 
     def patch(self, request):
         from agents.agent_identity import is_agent_name_available
 
-        student_id = request.user.account.student_id
-        student_key = make_student_id(student_id)
+        student_id = request.user.account.student_uuid
+        student_key = student_id
         new_name = str(request.data.get("agent_name", "")).strip()
 
         if not new_name:
@@ -774,7 +773,7 @@ class AgentNameAPIView(APIView):
         if not is_agent_name_available(new_name, exclude_student_id=student_key):
             return api_error("This agent name is already taken. Please choose another.", status.HTTP_409_CONFLICT)
 
-        profile, _ = StudentProfile.objects.get_or_create(student_id=student_key)
+        profile, _ = StudentProfile.objects.get_or_create(uuid=student_key)
         profile.agent_name = new_name
         profile.save(update_fields=["agent_name", "updated_at"])
 
@@ -841,7 +840,7 @@ def _escalation_meta(pending_query: Optional["PendingQuery"]) -> Dict[str, Any]:
 def agent_chat(request):
     from pure_multi_agent.runtime import run_turn
 
-    student_id = request.user.account.student_id
+    student_id = request.user.account.student_uuid
     message = str(request.data.get("message") or "")
     uploaded_files = request.FILES.getlist("attachments")
 
@@ -917,7 +916,7 @@ def agent_chat_edit(request, message_id):
 
     from pure_multi_agent.runtime import run_turn, seed_conversation
 
-    student_id = request.user.account.student_id
+    student_id = request.user.account.student_uuid
     new_message = str(request.data.get("message", "")).strip()
 
     if not new_message:
@@ -994,7 +993,7 @@ class ChatAttachmentDetailAPIView(APIView):
         except ChatAttachment.DoesNotExist:
             return api_error("Attachment not found.", status.HTTP_404_NOT_FOUND)
 
-        if attachment.message.student_id != request.user.account.student_id:
+        if attachment.message.student_id != request.user.account.student_uuid:
             return api_error("You may only access your own chat attachments.", status.HTTP_403_FORBIDDEN)
 
         file_path = Path(attachment.file_path)
@@ -1013,7 +1012,7 @@ class ChatAttachmentDetailAPIView(APIView):
 @api_view(["GET"])
 @permission_classes(STUDENT_PERMISSIONS)
 def agent_chat_history(request):
-    student_id = request.user.account.student_id
+    student_id = request.user.account.student_uuid
     limit = chat_history_limit(request)
     base_qs = ChatMessage.objects.filter(channel=ChatMessage.Channel.AGENT, student_id=student_id)
     total = base_qs.count()
@@ -1078,7 +1077,7 @@ def agent_chat_new(request):
     """
     from pure_multi_agent.runtime import reset_conversation
 
-    student_id = request.user.account.student_id
+    student_id = request.user.account.student_uuid
     deleted_count, _ = ChatMessage.objects.filter(
         channel=ChatMessage.Channel.AGENT, student_id=student_id
     ).delete()
@@ -1101,11 +1100,11 @@ class AssessmentHistoryView(APIView):
         account = get_account(request)
 
         if account.role == "student":
-            if account.student_id != student_id:
+            if account.student_uuid != student_id:
                 return api_error("You may only access your own assessment history.", status.HTTP_403_FORBIDDEN)
-            rows = FitAssessment.objects.filter(student__student_id=student_id)
+            rows = FitAssessment.objects.filter(student__uuid=student_id)
         else:
-            rows = FitAssessment.objects.filter(student__student_id=student_id, university_id=account.university_id)
+            rows = FitAssessment.objects.filter(student__uuid=student_id, university_id=account.university_uuid)
 
         return Response({
             "student_id": student_id,
@@ -1129,13 +1128,13 @@ class AssessmentDetailView(APIView):
     def get(self, request, university_id, student_id):
         account = get_account(request)
 
-        if account.role == "student" and account.student_id != student_id:
+        if account.role == "student" and account.student_uuid != student_id:
             return api_error("You may only access your own assessment history.", status.HTTP_403_FORBIDDEN)
-        if account.role != "student" and account.university_id != university_id:
+        if account.role != "student" and account.university_uuid != university_id:
             return api_error("You may only access your own university's assessment history.", status.HTTP_403_FORBIDDEN)
 
         row = (
-            FitAssessment.objects.filter(student__student_id=student_id, university_id=university_id)
+            FitAssessment.objects.filter(student__uuid=student_id, university_id=university_id)
             .order_by("-created_at")
             .first()
         )
@@ -1192,7 +1191,7 @@ class RoadmapView(APIView):
                 save_profile_data(student_id, profile)
                 # The profile JSON can exist before a StudentProfile row does
                 # -- don't 500 on the history write in that case.
-                student_row, _ = StudentProfile.objects.get_or_create(student_id=student_id)
+                student_row, _ = StudentProfile.objects.get_or_create(uuid=student_id)
                 RoadmapVersion.objects.create(
                     student=student_row,
                     request_message=user_message,
@@ -1223,7 +1222,7 @@ class RoadmapHistoryView(APIView):
     permission_classes = STUDENT_OWNER_PERMISSIONS
 
     def get(self, request, student_id):
-        rows = RoadmapVersion.objects.filter(student__student_id=student_id)
+        rows = RoadmapVersion.objects.filter(student__uuid=student_id)
         return Response({
             "student_id": student_id,
             "count": rows.count(),
@@ -1244,7 +1243,7 @@ class ResumeHistoryView(APIView):
     permission_classes = STUDENT_OWNER_PERMISSIONS
 
     def get(self, request, student_id):
-        rows = ResumeUpload.objects.filter(student__student_id=student_id)
+        rows = ResumeUpload.objects.filter(student__uuid=student_id)
         return Response({
             "student_id": student_id,
             "count": rows.count(),
@@ -1267,7 +1266,7 @@ class GitHubHistoryView(APIView):
     permission_classes = STUDENT_OWNER_PERMISSIONS
 
     def get(self, request, student_id):
-        rows = GitHubAnalysis.objects.filter(student__student_id=student_id)
+        rows = GitHubAnalysis.objects.filter(student__uuid=student_id)
         return Response({
             "student_id": student_id,
             "count": rows.count(),
@@ -1284,7 +1283,7 @@ class LinkedInHistoryView(APIView):
     permission_classes = STUDENT_OWNER_PERMISSIONS
 
     def get(self, request, student_id):
-        rows = LinkedInAnalysis.objects.filter(student__student_id=student_id)
+        rows = LinkedInAnalysis.objects.filter(student__uuid=student_id)
         return Response({
             "student_id": student_id,
             "count": rows.count(),
@@ -1308,7 +1307,7 @@ def _own_university_id_or_error(request):
     """(university_id, None) or (None, error Response). A university-role
     account with no university_id set is a misconfiguration -- fail closed
     rather than letting `filter(university_id=None)` match orphaned rows."""
-    own_university_id = request.user.account.university_id
+    own_university_id = request.user.account.university_uuid
     if not own_university_id:
         return None, Response(
             {"status": "failed", "message": "No university is associated with this account."},
@@ -1616,16 +1615,17 @@ class UniversityProfilesListView(APIView):
         profiles = []
 
         for entry in get_shortlisted_profiles(university_id, min_score=min_score, priority_tiers=priority_tiers):
-            row = StudentProfile.objects.filter(student_id=entry["student_id"]).first()
+            row = StudentProfile.objects.filter(uuid=entry["student_id"]).first()
             if row is None:
                 continue
 
-            data = load_profile_data(row.student_id)
+            row_uuid = str(row.uuid)
+            data = load_profile_data(row_uuid)
             assessment = entry["assessment"]
 
-            account = Account.objects.filter(student_id=row.student_id).select_related("user").first()
+            account = Account.objects.filter(student_profile=row).select_related("user").first()
             listed_student = (
-                ListedStudent.objects.filter(claimed_student_id=row.student_id, status=ListedStudent.Status.CLAIMED)
+                ListedStudent.objects.filter(claimed_student_id=row_uuid, status=ListedStudent.Status.CLAIMED)
                 .select_related("source_list__institute")
                 .order_by("-claimed_at")
                 .first()
@@ -1639,7 +1639,7 @@ class UniversityProfilesListView(APIView):
                 "is_active": account.user.is_active if account else None,
                 "date_joined": account.user.date_joined if account else None,
                 "profile_image_url": (
-                    request.build_absolute_uri(f"/api/profile/{row.student_id}/image/")
+                    request.build_absolute_uri(f"/api/profile/{row_uuid}/image/")
                     if row.profile_image_path
                     else None
                 ),
@@ -1710,7 +1710,7 @@ class UniversityProfileDetailAPIView(APIView):
         except FileNotFoundError as exc:
             return api_error(str(exc), status.HTTP_404_NOT_FOUND)
 
-        row = StudentProfile.objects.filter(student_id=student_id).first()
+        row = StudentProfile.objects.filter(uuid=student_id).first()
         profile["profile_image_url"] = (
             request.build_absolute_uri(f"/api/profile/{student_id}/image/")
             if row and row.profile_image_path
@@ -1719,7 +1719,7 @@ class UniversityProfileDetailAPIView(APIView):
 
         response_data = format_profile_response(profile)
 
-        account = Account.objects.filter(student_id=student_id).select_related("user").first()
+        account = Account.objects.filter(student_profile__uuid=student_id).select_related("user").first()
         listed_student = (
             ListedStudent.objects.filter(claimed_student_id=student_id, status=ListedStudent.Status.CLAIMED)
             .select_related("source_list__institute")

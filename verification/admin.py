@@ -13,7 +13,7 @@ class VerificationItemInline(admin.TabularInline):
 @admin.register(VerificationCheck)
 class VerificationCheckAdmin(admin.ModelAdmin):
     list_display = ("student", "status", "engine", "missing_sources", "last_analyzed_at", "updated_at")
-    search_fields = ("student__student_id",)
+    search_fields = ()
     list_filter = ("status", "engine")
     inlines = [VerificationItemInline]
 
@@ -21,5 +21,5 @@ class VerificationCheckAdmin(admin.ModelAdmin):
 @admin.register(VerificationItem)
 class VerificationItemAdmin(admin.ModelAdmin):
     list_display = ("verification_check", "key", "severity", "is_resolved", "resolution", "created_at")
-    search_fields = ("verification_check__student__student_id", "key", "message")
+    search_fields = ("key", "message")
     list_filter = ("dimension", "severity", "is_resolved", "resolution")

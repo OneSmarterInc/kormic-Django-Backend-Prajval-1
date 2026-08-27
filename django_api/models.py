@@ -15,7 +15,10 @@ class StudentProfile(models.Model):
     that aren't covered by an explicit column, so no data is ever dropped.
     """
 
-    student_id = models.CharField(max_length=255, unique=True, db_index=True)
+    # Public, non-guessable identifier used in every API URL, cache key, and
+    # cross-table string reference. The integer auto `id` stays purely
+    # internal (FKs, joins, admin). Replaces the previous email-derived slug.
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, db_index=True)
 
     # Display name for this student's personal agent -- the single entry
     # point the student talks to. Auto-assigned on first use (see
@@ -109,7 +112,7 @@ class StudentProfile(models.Model):
         ordering = ["-updated_at"]
 
     def __str__(self) -> str:
-        return f"StudentProfile({self.student_id})"
+        return f"StudentProfile({self.uuid})"
 
 
 class IntakeSession(models.Model):
@@ -136,8 +139,9 @@ class ChatMessage(models.Model):
     and intake chat, replacing the in-process-only agent-cache dicts (now in
     agents/commons.py) that were lost on every server restart.
 
-    student_id/university_id are plain strings (not FKs) since a chat turn can
-    happen before a StudentProfile row is ever saved.
+    student_id/university_id are plain strings (StudentProfile.uuid /
+    University.uuid, not FKs) since a chat turn can happen before a
+    StudentProfile row is ever saved.
     """
 
     class Channel(models.TextChoices):
@@ -201,7 +205,7 @@ class ResumeUpload(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"ResumeUpload({self.student.student_id}, {self.original_filename})"
+        return f"ResumeUpload({self.student.uuid}, {self.original_filename})"
 
 
 class GitHubAnalysis(models.Model):
@@ -214,7 +218,7 @@ class GitHubAnalysis(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"GitHubAnalysis({self.student.student_id}, {self.github_url})"
+        return f"GitHubAnalysis({self.student.uuid}, {self.github_url})"
 
 
 class LinkedInAnalysis(models.Model):
@@ -227,7 +231,7 @@ class LinkedInAnalysis(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"LinkedInAnalysis({self.student.student_id})"
+        return f"LinkedInAnalysis({self.student.uuid})"
 
 
 class FitAssessment(models.Model):
@@ -240,7 +244,7 @@ class FitAssessment(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"FitAssessment({self.student.student_id}, {self.university_id})"
+        return f"FitAssessment({self.student.uuid}, {self.university_id})"
 
 
 class UniversityInterestEvent(models.Model):
@@ -274,7 +278,7 @@ class UniversityInterestEvent(models.Model):
         ]
 
     def __str__(self) -> str:
-        return f"UniversityInterestEvent({self.student.student_id}, {self.university_id}, {self.source})"
+        return f"UniversityInterestEvent({self.student.uuid}, {self.university_id}, {self.source})"
 
 
 class RoadmapVersion(models.Model):
@@ -287,7 +291,7 @@ class RoadmapVersion(models.Model):
         ordering = ["-created_at"]
 
     def __str__(self) -> str:
-        return f"RoadmapVersion({self.student.student_id})"
+        return f"RoadmapVersion({self.student.uuid})"
 
 
 class AriaMemory(models.Model):
@@ -478,7 +482,7 @@ class AgentIdentity(models.Model):
 
     agent_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner_type = models.CharField(max_length=20, choices=OwnerType.choices, db_index=True)
-    # StudentProfile.student_id or University.id -- deliberately a plain
+    # StudentProfile.uuid or University.uuid -- deliberately a plain
     # string FK-by-convention (not a real FK) so an identity row, once
     # created, is never cascade-deleted by profile/university churn.
     owner_id = models.CharField(max_length=255, db_index=True)

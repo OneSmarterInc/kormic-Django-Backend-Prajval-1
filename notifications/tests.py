@@ -26,7 +26,7 @@ class PushTokenModelTests(TestCase):
     def _account(self):
         from accounts.models import Account
 
-        return Account.objects.get(student_id=self.student_id)
+        return Account.objects.get(student_profile__uuid=self.student_id)
 
     def test_token_unique_across_accounts(self):
         PushToken.objects.create(account=self._account(), token="ExponentPushToken[abc]")
@@ -56,7 +56,7 @@ class PushTokenEndpointTests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         token = PushToken.objects.get(token="ExponentPushToken[xyz]")
-        self.assertEqual(token.account.student_id, self.student_id)
+        self.assertEqual(token.account.student_uuid, self.student_id)
         self.assertEqual(token.platform, "ios")
         self.assertTrue(token.is_active)
 
@@ -78,7 +78,7 @@ class PushTokenEndpointTests(TestCase):
         other.post("/api/notifications/register-token/", {"token": "ExponentPushToken[shared]"}, format="json")
 
         token = PushToken.objects.get(token="ExponentPushToken[shared]")
-        self.assertEqual(token.account.student_id, other_id)
+        self.assertEqual(token.account.student_uuid, other_id)
         self.assertEqual(PushToken.objects.filter(token="ExponentPushToken[shared]").count(), 1)
 
     def test_unregister_deactivates_own_token(self):
@@ -206,7 +206,7 @@ class SendPushNotificationTaskTests(TestCase):
         self.student, self.student_id = make_student_client(email="task1@example.com")
         from accounts.models import Account
 
-        self.account = Account.objects.get(student_id=self.student_id)
+        self.account = Account.objects.get(student_profile__uuid=self.student_id)
         self.log = NotificationLog.objects.create(
             account=self.account,
             event_type=NotificationLog.EventType.AGENT_REPLY,
@@ -333,7 +333,7 @@ class CheckPushReceiptsTaskTests(TestCase):
         self.student, self.student_id = make_student_client(email="task2@example.com")
         from accounts.models import Account
 
-        self.account = Account.objects.get(student_id=self.student_id)
+        self.account = Account.objects.get(student_profile__uuid=self.student_id)
         self.token = PushToken.objects.create(account=self.account, token="ExponentPushToken[receipt]")
 
     @mock.patch("notifications.expo.get_expo_push_receipts")
@@ -388,7 +388,7 @@ class AgentChatNotificationTests(TestCase):
         resp = self.student.post("/api/chat/agent/", {"message": "Tell me about MIT"}, format="json")
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        log = NotificationLog.objects.get(account__student_id=self.student_id)
+        log = NotificationLog.objects.get(account__student_profile__uuid=self.student_id)
         self.assertEqual(log.event_type, NotificationLog.EventType.AGENT_REPLY)
         self.assertIn("Sure, here's the info", log.body)
         mock_delay.assert_called_once_with(log.id)
@@ -412,9 +412,9 @@ class PendingQueryResolutionNotificationTests(TestCase):
         cache.clear()
         _reset_inprocess_agent_caches()
         self.student, self.student_id = make_student_client(email="e2e2@example.com")
-        self.officer = make_university_client(email="officer-e2e@wsu.edu", university_id="wright_state_cs")
+        self.officer, self.university_id = make_university_client(email="officer-e2e@wsu.edu", university_id="wright_state_cs")
         self.query = PendingQuery.objects.create(
-            university_id="wright_state_cs",
+            university_id=self.university_id,
             student_id=self.student_id,
             student_name="Test Student",
             question="What is the application deadline?",
@@ -437,7 +437,7 @@ class PendingQueryResolutionNotificationTests(TestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-        log = NotificationLog.objects.get(account__student_id=self.student_id)
+        log = NotificationLog.objects.get(account__student_profile__uuid=self.student_id)
         self.assertEqual(log.event_type, NotificationLog.EventType.PENDING_QUERY_RESOLVED)
         self.assertIn("March 1st", log.body)
         mock_delay.assert_called_once_with(log.id)
@@ -455,7 +455,7 @@ class PendingQueryResolutionNotificationTests(TestCase):
         mock_get_agent.return_value = mock_agent
 
         orphan_query = PendingQuery.objects.create(
-            university_id="wright_state_cs",
+            university_id=self.university_id,
             student_id="",
             question="General question with no student attached.",
             status=PendingQuery.Status.PENDING,
@@ -481,7 +481,7 @@ class AgentInitiatedMessageCommandTests(TestCase):
     def test_command_sends_proactive_message(self, mock_delay):
         call_command("send_agent_message", self.student_id, "We found a great match for you!", "--title=New match")
 
-        log = NotificationLog.objects.get(account__student_id=self.student_id)
+        log = NotificationLog.objects.get(account__student_profile__uuid=self.student_id)
         self.assertEqual(log.title, "New match")
         self.assertEqual(log.event_type, NotificationLog.EventType.AGENT_INITIATED)
         mock_delay.assert_called_once_with(log.id)
@@ -582,11 +582,11 @@ class RunCheckinForStudentTests(TestCase):
         _reset_inprocess_agent_caches()
         self.student, self.student_id = make_student_client(email="proactive1@example.com")
         StudentProfile.objects.update_or_create(
-            student_id=self.student_id, defaults={"name": "Carol", "gaps": ["GitHub profile is missing."]}
+            uuid=self.student_id, defaults={"name": "Carol", "gaps": ["GitHub profile is missing."]}
         )
         from accounts.models import Account
 
-        self.account = Account.objects.get(student_id=self.student_id)
+        self.account = Account.objects.get(student_profile__uuid=self.student_id)
 
     @mock.patch("notifications.services.send_push_notification_task.delay")
     def test_sends_and_writes_chat_message_when_gap_exists(self, mock_delay):
@@ -642,7 +642,7 @@ class RunCheckinForStudentTests(TestCase):
     def test_complete_profile_with_no_gaps_sends_nothing(self, mock_delay):
         from notifications.proactive import run_checkin_for_student
 
-        StudentProfile.objects.update_or_create(student_id=self.student_id, defaults={"gaps": []})
+        StudentProfile.objects.update_or_create(uuid=self.student_id, defaults={"gaps": []})
         with mock.patch("django_api.services.compute_profile_intelligence") as mock_intel:
             mock_intel.return_value = {
                 "weaknesses": [],
@@ -666,10 +666,10 @@ class ProactiveCheckinTaskTests(TestCase):
         self.student_a, self.student_a_id = make_student_client(email="proactive-a@example.com")
         self.student_b, self.student_b_id = make_student_client(email="proactive-b@example.com")
         StudentProfile.objects.update_or_create(
-            student_id=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
+            uuid=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
         )
         StudentProfile.objects.update_or_create(
-            student_id=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
+            uuid=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
         )
 
     @mock.patch("notifications.tasks.run_proactive_checkin_batch_task.delay")
@@ -688,7 +688,7 @@ class ProactiveCheckinTaskTests(TestCase):
     def test_task_skips_students_without_a_real_account(self, mock_batch_delay):
         from notifications.tasks import run_proactive_checkins_task
 
-        StudentProfile.objects.create(student_id="ghost-profile", name="Ghost", gaps=["orphan gap"])
+        StudentProfile.objects.create(name="Ghost", gaps=["orphan gap"])  # no Account -> skipped by the batch
 
         result = run_proactive_checkins_task()
 
@@ -719,10 +719,10 @@ class ProactiveCheckinBatchTaskTests(TestCase):
         self.student_a, self.student_a_id = make_student_client(email="proactive-batch-a@example.com")
         self.student_b, self.student_b_id = make_student_client(email="proactive-batch-b@example.com")
         StudentProfile.objects.update_or_create(
-            student_id=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
+            uuid=self.student_a_id, defaults={"name": "Alice", "gaps": ["No GitHub profile."]}
         )
         StudentProfile.objects.update_or_create(
-            student_id=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
+            uuid=self.student_b_id, defaults={"name": "Bob", "gaps": ["No GitHub profile."]}
         )
 
     @mock.patch("notifications.tasks.send_push_notifications_batch_task.delay")
@@ -760,8 +760,8 @@ class SendPushNotificationsBatchTaskTests(TestCase):
         self.student_b, self.student_b_id = make_student_client(email="batch-push-b@example.com")
         from accounts.models import Account
 
-        self.account_a = Account.objects.get(student_id=self.student_a_id)
-        self.account_b = Account.objects.get(student_id=self.student_b_id)
+        self.account_a = Account.objects.get(student_profile__uuid=self.student_a_id)
+        self.account_b = Account.objects.get(student_profile__uuid=self.student_b_id)
         self.token_a = PushToken.objects.create(account=self.account_a, token="ExponentPushToken[a]")
         self.token_b = PushToken.objects.create(account=self.account_b, token="ExponentPushToken[b]")
         self.log_a = NotificationLog.objects.create(

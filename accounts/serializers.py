@@ -7,7 +7,6 @@ from rest_framework import serializers
 
 from accounts.models import Account
 from django_api.models import LinkedInAnalysis, ResumeUpload, StudentProfile
-from django_api.services import make_student_id
 
 
 class RegisterSerializer(serializers.Serializer):
@@ -33,15 +32,6 @@ class RegisterSerializer(serializers.Serializer):
         validate_password(value)
         return value
 
-    def validate(self, attrs):
-        student_id = make_student_id(attrs["email"])
-        if Account.objects.filter(student_id=student_id).exists():
-            raise serializers.ValidationError(
-                {"student_id": "An account derived from this email already exists."}
-            )
-        attrs["student_id"] = student_id
-        return attrs
-
     def create(self, validated_data) -> User:
         email = validated_data["email"]
 
@@ -52,10 +42,14 @@ class RegisterSerializer(serializers.Serializer):
                 password=validated_data["password"],
                 first_name=validated_data.get("name", "")[:150],
             )
+            profile = StudentProfile.objects.create(
+                name=validated_data.get("name", ""),
+                email=email,
+            )
             Account.objects.create(
                 user=user,
                 role=Account.Role.STUDENT,
-                student_id=validated_data["student_id"],
+                student_profile=profile,
             )
 
         return user
@@ -105,15 +99,15 @@ def student_onboarding_status(student_id: str) -> dict:
     data: a student's "already provided this" state is just whatever is in
     the DB right now, not a separately-tracked wizard-completion flag.
     """
-    profile = StudentProfile.objects.filter(student_id=student_id).first()
-    resume_uploaded = ResumeUpload.objects.filter(student__student_id=student_id).exists()
+    profile = StudentProfile.objects.filter(uuid=student_id).first()
+    resume_uploaded = ResumeUpload.objects.filter(student__uuid=student_id).exists()
     github_connected = bool(profile and profile.github)
     # LinkedIn is normally captured via image upload + parsing (not a typed
     # URL), so `profile.linkedin_url` alone stays empty for that path --
     # LinkedInAnalysis rows are the reliable signal. A manually-typed
     # linkedin_url (via the plain profile-update endpoint) also counts.
     linkedin_connected = bool(profile and profile.linkedin_url) or LinkedInAnalysis.objects.filter(
-        student__student_id=student_id
+        student__uuid=student_id
     ).exists()
 
     return {
@@ -134,18 +128,18 @@ def serialize_user(user: User) -> dict:
         "email": user.email,
         "name": user.first_name,
         "role": account.role if account else None,
-        "student_id": account.student_id if account else None,
-        "university_id": account.university_id if account else None,
-        "institute_id": account.institute_id if account else None,
+        "student_id": account.student_uuid if account else None,
+        "university_id": account.university_uuid if account else None,
+        "institute_id": account.institute_uuid if account else None,
         "totp_enrolled": totp_enrolled,
     }
 
-    if account and account.role == Account.Role.STUDENT and account.student_id:
-        data["onboarding"] = student_onboarding_status(account.student_id)
+    if account and account.role == Account.Role.STUDENT and account.student_uuid:
+        data["onboarding"] = student_onboarding_status(account.student_uuid)
 
-    if account and account.role == Account.Role.UNIVERSITY and account.university_id:
+    if account and account.role == Account.Role.UNIVERSITY and account.university_uuid:
         from universities.services import university_setup_status
 
-        data["university_setup_status"] = university_setup_status(account.university_id)
+        data["university_setup_status"] = university_setup_status(account.university_uuid)
 
     return data

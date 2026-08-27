@@ -25,16 +25,43 @@ class Account(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="account")
     role = models.CharField(max_length=20, choices=Role.choices)
 
-    # Only one of these is populated, depending on role.
-    student_id = models.CharField(max_length=255, null=True, blank=True, unique=True, db_index=True)
-    university_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
-    institute_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    # Only one of these is populated, depending on role. Real FKs to the
+    # integer PKs; the public-facing identifier is the target's `uuid`,
+    # reachable via the *_uuid properties below.
+    student_profile = models.OneToOneField(
+        "django_api.StudentProfile", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="account",
+    )
+    university = models.ForeignKey(
+        "universities.University", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="accounts",
+    )
+    institute = models.ForeignKey(
+        "institutes.Institute", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="accounts",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self) -> str:
         return f"Account({self.user.email}, {self.role})"
+
+    # Public string identifiers -- what every API URL, cache key and
+    # cross-table string reference uses. None when the link is unset.
+    # (`university_id` / `institute_id` are taken by Django's auto FK
+    # attribute and hold the internal integer PK, so these are *_uuid.)
+    @property
+    def student_uuid(self) -> str | None:
+        return str(self.student_profile.uuid) if self.student_profile_id else None
+
+    @property
+    def university_uuid(self) -> str | None:
+        return str(self.university.uuid) if self.university_id else None
+
+    @property
+    def institute_uuid(self) -> str | None:
+        return str(self.institute.uuid) if self.institute_id else None
 
 
 class TOTPDevice(models.Model):

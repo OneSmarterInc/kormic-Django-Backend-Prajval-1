@@ -31,7 +31,7 @@ class VerificationStatusAPIView(APIView):
     permission_classes = STUDENT_PERMISSIONS
 
     def get(self, request):
-        student_id = request.user.account.student_id
+        student_id = request.user.account.student_uuid
         return Response(services.run_verification(student_id, user=request.user), status=status.HTTP_200_OK)
 
 
@@ -54,7 +54,7 @@ class VerificationItemListAPIView(APIView):
     permission_classes = STUDENT_PERMISSIONS
 
     def get(self, request):
-        student_id = request.user.account.student_id
+        student_id = request.user.account.student_uuid
         filter_status = str(request.query_params.get("status", "open")).strip().lower()
 
         if filter_status not in services.VALID_ITEM_FILTERS:

@@ -63,7 +63,7 @@ class SuperuserAccessTests(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_university_officer_is_forbidden(self):
-        officer = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
+        officer, _ = make_university_client(email="officer1@wsu.edu", university_id="wright_state_cs")
         resp = officer.get("/api/superuser/universities/")
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
@@ -97,7 +97,7 @@ class SuperuserStudentAPITests(TestCase):
 
         resp = self.admin.delete(f"/api/superuser/students/{student_id}/")
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(Account.objects.filter(student_id=student_id).exists())
+        self.assertFalse(Account.objects.filter(student_profile__uuid=student_id).exists())
 
         resp = self.admin.get(f"/api/superuser/students/{student_id}/")
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
@@ -127,8 +127,8 @@ class SuperuserUniversityAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         university_id = resp.data["id"]
-        self.assertTrue(University.objects.filter(pk=university_id).exists())
-        self.assertTrue(Account.objects.filter(university_id=university_id, role=Account.Role.UNIVERSITY).exists())
+        self.assertTrue(University.objects.filter(uuid=university_id).exists())
+        self.assertTrue(Account.objects.filter(university__uuid=university_id, role=Account.Role.UNIVERSITY).exists())
         self.assertEqual(resp.data["officer_count"], 1)
 
     def test_enroll_university_requires_admin_credentials(self):
@@ -177,7 +177,7 @@ class SuperuserUniversityAPITests(TestCase):
 
         resp = self.admin.delete(f"/api/superuser/universities/{university_id}/")
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
-        self.assertTrue(University.objects.filter(pk=university_id).exists())
+        self.assertTrue(University.objects.filter(uuid=university_id).exists())
 
     def test_university_detail_includes_admin_and_university_email(self):
         resp = self.admin.post(
@@ -244,8 +244,8 @@ class SuperuserInstituteAPITests(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
         institute_id = resp.data["id"]
-        self.assertTrue(Institute.objects.filter(pk=institute_id).exists())
-        self.assertTrue(Account.objects.filter(institute_id=institute_id, role=Account.Role.INSTITUTE).exists())
+        self.assertTrue(Institute.objects.filter(uuid=institute_id).exists())
+        self.assertTrue(Account.objects.filter(institute__uuid=institute_id, role=Account.Role.INSTITUTE).exists())
 
     def test_enroll_institute_requires_admin_credentials(self):
         resp = self.admin.post(
@@ -291,7 +291,7 @@ class SuperuserInstituteAPITests(TestCase):
 
         resp = self.admin.delete(f"/api/superuser/institutes/{institute_id}/")
         self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
-        self.assertTrue(Institute.objects.filter(pk=institute_id).exists())
+        self.assertTrue(Institute.objects.filter(uuid=institute_id).exists())
 
     def test_institute_detail_includes_admin_email_and_contacts(self):
         resp = self.admin.post(
@@ -371,7 +371,7 @@ class SuperuserUserManagementTests(TestCase):
 
         resp = self.admin.delete(f"/api/superuser/users/{user_id}/")
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(Account.objects.filter(student_id=student_id).exists())
+        self.assertFalse(Account.objects.filter(student_profile__uuid=student_id).exists())
 
     def test_users_list_can_filter_by_role(self):
         make_student_client(email="filterme@example.com")
@@ -531,20 +531,20 @@ class AuthActivityLoggingTests(TestCase):
         self.assertEqual(entry.target_university_id, "")
 
     def test_university_officer_login_is_tagged_with_its_university_id(self):
-        make_university_client(email="officer_login@wsu.edu", university_id="tagged_univ")
+        _, tagged_uuid = make_university_client(email="officer_login@wsu.edu", university_id="tagged_univ")
         entry = ActivityLog.objects.filter(
             action=ActivityLog.Action.LOGIN_SUCCEEDED, target_email="officer_login@wsu.edu"
         ).first()
         self.assertIsNotNone(entry)
-        self.assertEqual(entry.target_university_id, "tagged_univ")
+        self.assertEqual(entry.target_university_id, tagged_uuid)
         self.assertEqual(entry.target_role, "university")
         self.assertEqual(entry.target_student_id, "")
 
         # The audit log's university_id filter finds it, and finds nothing
         # for an unrelated university.
-        resp = self.admin.get("/api/superuser/audit-log/?university_id=tagged_univ")
+        resp = self.admin.get(f"/api/superuser/audit-log/?university_id={tagged_uuid}")
         self.assertTrue(any(e["target_email"] == "officer_login@wsu.edu" for e in resp.data["entries"]))
-        self.assertTrue(all(e["target_university_id"] == "tagged_univ" for e in resp.data["entries"]))
+        self.assertTrue(all(e["target_university_id"] == tagged_uuid for e in resp.data["entries"]))
 
         resp = self.admin.get("/api/superuser/audit-log/?university_id=some_other_univ")
         self.assertFalse(any(e["target_email"] == "officer_login@wsu.edu" for e in resp.data["entries"]))
@@ -653,13 +653,13 @@ class PilotEscalationMetricsTests(TestCase):
         cache.clear()
         _reset_inprocess_agent_caches()
         self.admin = make_superuser_client()
-        self.university = University.objects.create(id="metrics_u", name="Metrics University")
+        self.university = University.objects.create(name="Metrics University")
         ensure_default_groups(self.university)
         self.money_group = self.university.knowledge_groups.get(slug=KnowledgeGroup.Slug.MONEY)
 
     def _backdated_query(self, *, student_id, days_ago, group=None):
         query = PendingQuery.objects.create(
-            university_id=self.university.id,
+            university_id=str(self.university.uuid),
             student_id=student_id,
             question="q",
             group=group,
@@ -679,9 +679,9 @@ class PilotEscalationMetricsTests(TestCase):
         # Outside the default 12-week window entirely -- must not be counted.
         self._backdated_query(student_id="s3", days_ago=200)
 
-        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.id}")
+        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.uuid}")
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(resp.data["university_id"], self.university.id)
+        self.assertEqual(resp.data["university_id"], str(self.university.uuid))
 
         total_escalations = sum(week["total_escalations"] for week in resp.data["weeks"])
         self.assertEqual(total_escalations, 2)
@@ -694,7 +694,7 @@ class PilotEscalationMetricsTests(TestCase):
     def test_blank_student_id_excluded_from_denominator_not_from_total(self):
         self._backdated_query(student_id="", days_ago=1)
 
-        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.id}")
+        resp = self.admin.get(f"/api/superuser/metrics/escalations/?university_id={self.university.uuid}")
         this_week = next(week for week in resp.data["weeks"] if week["total_escalations"] > 0)
         self.assertEqual(this_week["total_escalations"], 1)
         self.assertEqual(this_week["distinct_students"], 0)
@@ -706,10 +706,10 @@ class PilotEscalationMetricsTests(TestCase):
         self.assertEqual(resp.data["weeks"], [])
 
     def test_omitting_university_id_combines_every_university(self):
-        other_university = University.objects.create(id="metrics_u2", name="Second Metrics University")
+        other_university = University.objects.create(name="Second Metrics University")
         self._backdated_query(student_id="s1", days_ago=1)
-        PendingQuery.objects.filter(university_id=self.university.id).update(university_id=self.university.id)
-        query = PendingQuery.objects.create(university_id=other_university.id, student_id="s2", question="q")
+        PendingQuery.objects.filter(university_id=str(self.university.uuid)).update(university_id=str(self.university.uuid))
+        query = PendingQuery.objects.create(university_id=str(other_university.uuid), student_id="s2", question="q")
         PendingQuery.objects.filter(id=query.id).update(created_at=datetime.now(dt_timezone.utc) - timedelta(days=1))
 
         resp = self.admin.get("/api/superuser/metrics/escalations/")

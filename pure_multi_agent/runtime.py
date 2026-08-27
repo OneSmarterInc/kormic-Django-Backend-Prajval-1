@@ -81,12 +81,12 @@ def _load_context(student_id: str) -> Dict[str, Any]:
     or any agent rename, is always visible on the very next message."""
     from agents.agent_identity import ensure_agent_name
     from django_api.models import AriaMemory, StudentProfile
-    from django_api.services import load_profile_data, make_student_id
+    from django_api.services import load_profile_data
     from verification.services import list_items
 
-    key = make_student_id(student_id)
+    key = student_id
 
-    profile_row, _ = StudentProfile.objects.get_or_create(student_id=key)
+    profile_row, _ = StudentProfile.objects.get_or_create(uuid=key)
     agent_name = ensure_agent_name(profile_row)
 
     student_profile = load_profile_data(student_id)
@@ -123,9 +123,9 @@ def _load_context(student_id: str) -> Dict[str, Any]:
 
 def _persist_context(student_id: str, ctx: Dict[str, Any]) -> None:
     from django_api.models import AriaMemory
-    from django_api.services import make_student_id, save_profile_data
+    from django_api.services import save_profile_data
 
-    key = make_student_id(student_id)
+    key = student_id
 
     ctx["student_profile"]["response_mode"] = ctx["response_mode"]
     save_profile_data(student_id, ctx["student_profile"])
@@ -173,9 +173,7 @@ def reset_conversation(student_id: str) -> None:
     history) separately; this only clears the short-term turn-to-turn state
     kept here in _checkpointer.
     """
-    from django_api.services import make_student_id
-
-    key = make_student_id(student_id)
+    key = student_id
     _checkpointer.delete_thread(key)
 
 

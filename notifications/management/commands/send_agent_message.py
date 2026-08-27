@@ -21,7 +21,7 @@ class Command(BaseCommand):
     help = "Send a proactive agent-initiated chat message + push notification to a student."
 
     def add_arguments(self, parser):
-        parser.add_argument("student_id", help="The student's student_id (see Account.student_id).")
+        parser.add_argument("student_id", help="The student's uuid (Account.student_uuid / StudentProfile.uuid).")
         parser.add_argument("message", help="Message text -- appears in chat and as the push notification body.")
         parser.add_argument("--title", default="New message from your agent", help="Push notification title.")
 
