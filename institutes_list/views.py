@@ -6,12 +6,15 @@ import csv
 import hashlib
 import io
 import secrets
+import uuid
+from pathlib import Path
 from urllib.parse import urlencode
 
 from django.conf import settings
 from django.core import signing
 from django.core.mail import send_mail
 from django.db.models import Count, Q
+from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, throttle_classes
@@ -82,6 +85,44 @@ def _find_claimable(email: str = "", token: str = ""):
     return None
 
 
+def _store_source_file(institute_id: str, upload) -> dict:
+    """
+    Persist the raw uploaded sheet verbatim under MEDIA_ROOT/institute_lists/
+    <institute_id>/ and return the fields to stamp on UniversityStudentList.
+    The filename is uuid-suffixed so re-uploading a same-named file doesn't
+    clobber an older list's copy.
+    """
+    target_dir = Path(settings.MEDIA_ROOT) / "institute_lists" / str(institute_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = Path(upload.name or "list.csv").name
+    unique_name = f"{Path(safe_name).stem}__{uuid.uuid4().hex[:8]}{Path(safe_name).suffix}"
+    file_path = target_dir / unique_name
+
+    try:
+        upload.seek(0)
+    except Exception:
+        pass
+    with open(file_path, "wb") as destination:
+        for chunk in upload.chunks():
+            destination.write(chunk)
+
+    return {
+        "source_file_path": str(file_path),
+        "source_file_name": safe_name,
+        "source_file_content_type": getattr(upload, "content_type", "") or "",
+        "source_file_size": file_path.stat().st_size,
+    }
+
+
+def _source_file_url(request, lst: UniversityStudentList):
+    """Absolute URL the frontend can GET to download this list's original
+    sheet, or None if the list has no stored file (older uploads)."""
+    if not lst.source_file_path:
+        return None
+    return request.build_absolute_uri(f"/api/institute-lists/lists/{lst.id}/file/")
+
+
 # ---------------------------------------------------------------------------
 # Intake (university / superuser side)
 # ---------------------------------------------------------------------------
@@ -140,12 +181,15 @@ def upload_list(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    source_file_fields = _store_source_file(institute.id, upload)
+
     source_list = UniversityStudentList.objects.create(
         institute=institute,
         contact_name=contact_name,
         contact_email=contact_email,
         contact_verification=str(request.data.get("contact_verification") or "").strip(),
         uploaded_by=getattr(request.user, "email", "") or str(request.user),
+        **source_file_fields,
     )
 
     accepted, rejected, skipped_claimed, seen = 0, [], [], set()
@@ -231,6 +275,10 @@ def list_lists(request):
     An institute account sees only its own uploaded lists; a superuser sees
     all, optionally filtered. Answers "which lists have I uploaded and how
     are they progressing" -- claimed/unclaimed counts per list.
+
+    Each list also carries source_file_url (GET it to download the original
+    uploaded sheet; null for lists uploaded before the file was retained)
+    plus source_file_name / source_file_size for display.
     """
     account, error = _require_institute_or_superuser(request)
     if error:
@@ -271,6 +319,9 @@ def list_lists(request):
                 # claimed_count is all-time; clamp so a re-upload can't yield
                 # a negative "unclaimed" here.
                 "unclaimed_count": max(0, lst.row_count - claimed_count),
+                "source_file_url": _source_file_url(request, lst),
+                "source_file_name": lst.source_file_name or None,
+                "source_file_size": lst.source_file_size or None,
                 "created_at": lst.created_at,
             }
         )
@@ -309,7 +360,53 @@ def list_students(request, list_id):
         }
         for row in lst.students.all()
     ]
-    return Response({"list_id": lst.id, "students": students})
+    return Response(
+        {
+            "list_id": lst.id,
+            "source_file_url": _source_file_url(request, lst),
+            "source_file_name": lst.source_file_name or None,
+            "students": students,
+        }
+    )
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def download_source_file(request, list_id):
+    """
+    GET /api/institute-lists/lists/<list_id>/file/
+    Download the original sheet that was uploaded for this list. Same
+    ownership scoping as list_students (institute sees only its own lists;
+    superuser sees all).
+    """
+    account, error = _require_institute_or_superuser(request)
+    if error:
+        return error
+
+    lst, error = _get_owned_list(account, list_id)
+    if error:
+        return error
+
+    if not lst.source_file_path:
+        return Response(
+            {"error": "no source file was retained for this list"}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    file_path = Path(lst.source_file_path)
+    if not file_path.exists():
+        return Response(
+            {"error": "source file is missing on the server"}, status=status.HTTP_404_NOT_FOUND
+        )
+
+    # Read fully into memory rather than handing FileResponse an open handle
+    # (keeps the handle short-lived; matches the download views elsewhere).
+    content = file_path.read_bytes()
+    return FileResponse(
+        io.BytesIO(content),
+        as_attachment=True,
+        filename=lst.source_file_name or file_path.name,
+        content_type=lst.source_file_content_type or "application/octet-stream",
+    )
 
 
 @api_view(["POST"])
@@ -496,6 +593,13 @@ def confirm_claim(request):
     divergence between the list's values and the student's confirmed values,
     and creates/updates the StudentProfile tagged university-sourced with
     full provenance in extra_data.
+
+    If a StudentProfile already exists for this email (the student had
+    already self-registered and filled in their own profile), the claim only
+    *fills blank* fields -- it never overwrites values the student has
+    already set. The provenance badge and the claim email are always
+    applied. For a brand-new profile the confirmed values populate it in
+    full, as before.
     """
     session = str(request.data.get("claim_session") or "")
     fields = request.data.get("fields") or {}
@@ -529,12 +633,26 @@ def confirm_claim(request):
     from django_api.services import make_student_id
 
     student_id = make_student_id(row.email)
-    profile, _ = StudentProfile.objects.get_or_create(student_id=student_id)
-    profile.name = confirmed["full_name"] or profile.name
+    profile, created = StudentProfile.objects.get_or_create(student_id=student_id)
+
+    # Email is the claim anchor (proven via OTP) and is not student-editable
+    # in this flow -- always apply it.
     profile.email = row.email
-    profile.major = confirmed["field_of_study"] or profile.major
-    profile.program = confirmed.get("program_name") or profile.program
-    profile.institution = row.source_list.institute.name or profile.institution
+
+    # Never clobber a self-managed profile: on an existing row, a claimed
+    # field is only written if the profile's own value is still blank.
+    def _apply(attr: str, value: str) -> None:
+        value = (value or "").strip()
+        if not value:
+            return
+        if created or not (getattr(profile, attr) or "").strip():
+            setattr(profile, attr, value)
+
+    _apply("name", confirmed["full_name"])
+    _apply("major", confirmed["field_of_study"])
+    _apply("program", confirmed.get("program_name"))
+    _apply("institution", row.source_list.institute.name)
+
     extra = profile.extra_data or {}
     extra["institute_sourced"] = {
         "list_id": row.source_list_id,

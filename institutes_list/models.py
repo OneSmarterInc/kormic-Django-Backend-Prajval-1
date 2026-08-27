@@ -32,6 +32,15 @@ class UniversityStudentList(models.Model):
     uploaded_by = models.CharField(max_length=255, blank=True, default="")
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.ACTIVE)
     row_count = models.IntegerField(default=0)
+
+    # The original uploaded sheet, kept verbatim as part of the provenance
+    # record so an institute/superuser can download exactly what was sent.
+    # Blank on lists uploaded before this was added.
+    source_file_path = models.CharField(max_length=1000, blank=True, default="")
+    source_file_name = models.CharField(max_length=500, blank=True, default="")
+    source_file_content_type = models.CharField(max_length=150, blank=True, default="")
+    source_file_size = models.PositiveIntegerField(default=0)
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

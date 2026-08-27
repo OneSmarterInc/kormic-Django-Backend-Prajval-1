@@ -62,6 +62,7 @@ from django_api.services import (
     save_chat_attachment,
     save_profile_data,
     make_student_id,
+    student_has_university_interest,
     upload_profile_image,
     ProfileValidationError,
 )
@@ -1303,11 +1304,46 @@ class LinkedInHistoryView(APIView):
 # API 11: Pending Queries
 # ---------------------------------------------------------------------
 
+def _own_university_id_or_error(request):
+    """(university_id, None) or (None, error Response). A university-role
+    account with no university_id set is a misconfiguration -- fail closed
+    rather than letting `filter(university_id=None)` match orphaned rows."""
+    own_university_id = request.user.account.university_id
+    if not own_university_id:
+        return None, Response(
+            {"status": "failed", "message": "No university is associated with this account."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return own_university_id, None
+
+
+def _get_scoped_pending_query(request, query_id):
+    """
+    Look a PendingQuery up *within the caller's own university*. A query that
+    belongs to another university -- or an orphaned one with a blank
+    university_id -- is a plain 404, never reachable for mutation. Returns
+    (query, None) or (None, error Response).
+    """
+    own_university_id, error = _own_university_id_or_error(request)
+    if error:
+        return None, error
+
+    query = PendingQuery.objects.filter(id=query_id, university_id=own_university_id).first()
+    if query is None:
+        return None, Response(
+            {"status": "failed", "message": f"Pending query not found for query_id: {query_id}"},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+    return query, None
+
+
 class PendingQueriesView(APIView):
     permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole]
 
     def get(self, request):
-        own_university_id = request.user.account.university_id
+        own_university_id, error = _own_university_id_or_error(request)
+        if error:
+            return error
         rows = PendingQuery.objects.filter(university_id=own_university_id).exclude(
             status__in=[PendingQuery.Status.RESOLVED, PendingQuery.Status.IGNORED]
         )
@@ -1356,13 +1392,9 @@ class AnswerPendingQueryView(APIView):
         except (TypeError, ValueError):
             return Response({"status": "failed", "message": "query_id must be a number"}, status=status.HTTP_400_BAD_REQUEST)
 
-        selected_query = PendingQuery.objects.filter(id=query_id_int).first()
-
-        if not selected_query:
-            return Response(
-                {"status": "failed", "message": f"Pending query not found for query_id: {query_id_int}"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        selected_query, error = _get_scoped_pending_query(request, query_id_int)
+        if error:
+            return error
 
         if selected_query.status == PendingQuery.Status.RESOLVED:
             return Response(
@@ -1370,17 +1402,9 @@ class AnswerPendingQueryView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Guaranteed non-empty and == the caller's own university by
+        # _get_scoped_pending_query.
         university_id = selected_query.university_id
-        if university_id and university_id != request.user.account.university_id:
-            return Response(
-                {"status": "failed", "message": "You may only answer queries for your own university."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        if not university_id:
-            return Response(
-                {"status": "failed", "message": "university_id is missing in pending query record."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         try:
             from agents import commons
@@ -1642,6 +1666,24 @@ class UniversityProfilesListView(APIView):
         })
 
 
+def _student_in_university_scope_or_404(university_id: str, student_id: str):
+    """
+    Access boundary for the officer dashboard's per-student endpoints: an
+    officer may only reach a student who has actually engaged with their
+    university (an UniversityInterestEvent -- searched it, ran a fit check,
+    etc.), the same population UniversityProfilesListView is built from.
+
+    Returns an error Response to send back, or None if the student is in
+    scope. 404 (not 403) is deliberate -- an officer has no business learning
+    whether a given student_id exists at all outside their own scope.
+    """
+    if student_has_university_interest(student_id, university_id):
+        return None
+    return api_error(
+        "No such student in this university's dashboard.", status.HTTP_404_NOT_FOUND
+    )
+
+
 class UniversityProfileDetailAPIView(APIView):
     """
     GET /api/university/<university_id>/profile/<student_id>/
@@ -1650,14 +1692,19 @@ class UniversityProfileDetailAPIView(APIView):
     returns per-student essentials for the roster list -- this is where the
     rest (skills, projects, intelligence breakdowns, etc.) lives.
 
-    student_id is intentionally unrestricted here (any student in the
-    university's own dashboard may be inspected) -- only university_id is
-    scoped, via ScopedToOwnUniversityId in UNIVERSITY_OWNER_PERMISSIONS.
+    university_id is scoped via ScopedToOwnUniversityId; student_id is
+    additionally gated to students who have shown interest in this university
+    (see _student_in_university_scope_or_404) so one university's officer
+    can't read arbitrary students' profiles.
     """
 
     permission_classes = UNIVERSITY_OWNER_PERMISSIONS
 
     def get(self, request, university_id: str, student_id: str):
+        scope_error = _student_in_university_scope_or_404(university_id, student_id)
+        if scope_error:
+            return scope_error
+
         try:
             profile = get_profile(student_id)
         except FileNotFoundError as exc:
@@ -1706,15 +1753,20 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
     POST /api/university/<university_id>/profile/<student_id>/chat/
     University-officer-facing chat about one student (ProfilePresenterAgent) —
     distinct from /api/chat/agent/, which is the student-facing agent.
-    student_id is intentionally unrestricted here (any student in the
-    university's own dashboard may be asked about) — only university_id
-    is scoped, via ScopedToOwnUniversityId in UNIVERSITY_OWNER_PERMISSIONS.
+    university_id is scoped via ScopedToOwnUniversityId; student_id is
+    additionally gated to students who have shown interest in this university
+    (see _student_in_university_scope_or_404), so an officer can't ask about
+    -- or trigger a fit assessment for -- an arbitrary student.
     """
     question = request.data.get("question")
     history = request.data.get("history", []) or []
 
     if not question:
         return api_error("question is required.")
+
+    scope_error = _student_in_university_scope_or_404(university_id, student_id)
+    if scope_error:
+        return scope_error
 
     try:
         profile = get_profile(student_id)
@@ -1754,6 +1806,10 @@ def university_profile_presenter_chat(request, university_id: str, student_id: s
 @api_view(["GET"])
 @permission_classes(UNIVERSITY_OWNER_PERMISSIONS)
 def university_profile_presenter_chat_history(request, university_id: str, student_id: str):
+    scope_error = _student_in_university_scope_or_404(university_id, student_id)
+    if scope_error:
+        return scope_error
+
     limit = chat_history_limit(request)
     base_qs = ChatMessage.objects.filter(
         channel=ChatMessage.Channel.PRESENTER, student_id=student_id, university_id=university_id
@@ -1953,27 +2009,11 @@ class EditPendingQueryView(APIView):
         if not answer:
             return Response({"status": "failed", "message": "answer is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        selected_query = PendingQuery.objects.filter(id=query_id).first()
-
-        if not selected_query:
-            return Response(
-                {"status": "failed", "message": f"Query not found for query_id: {query_id}"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        selected_query, error = _get_scoped_pending_query(request, query_id)
+        if error:
+            return error
 
         university_id = selected_query.university_id
-
-        if university_id and university_id != request.user.account.university_id:
-            return Response(
-                {"status": "failed", "message": "You may only edit queries for your own university."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        if not university_id:
-            return Response(
-                {"status": "failed", "message": "university_id is missing in query record."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
         try:
             from agents import commons
@@ -2013,20 +2053,11 @@ class IgnorePendingQueryView(APIView):
         reason = request.data.get("reason", "")
         ignored_by = request.data.get("ignored_by", "Admin")
 
-        selected_query = PendingQuery.objects.filter(id=query_id).first()
-
-        if not selected_query:
-            return Response(
-                {"status": "failed", "message": f"Query not found for query_id: {query_id}"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+        selected_query, error = _get_scoped_pending_query(request, query_id)
+        if error:
+            return error
 
         university_id = selected_query.university_id
-        if university_id and university_id != request.user.account.university_id:
-            return Response(
-                {"status": "failed", "message": "You may only ignore queries for your own university."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
 
         if selected_query.status == PendingQuery.Status.RESOLVED:
             return Response(
@@ -2058,20 +2089,9 @@ class DeletePendingQueryView(APIView):
     permission_classes = [IsAuthenticated, IsTOTPEnrolled, IsUniversityRole]
 
     def delete(self, request, query_id: int):
-        selected_query = PendingQuery.objects.filter(id=query_id).first()
-
-        if not selected_query:
-            return Response(
-                {"status": "failed", "message": f"Query not found for query_id: {query_id}"},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        university_id = selected_query.university_id
-        if university_id and university_id != request.user.account.university_id:
-            return Response(
-                {"status": "failed", "message": "You may only delete queries for your own university."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
+        selected_query, error = _get_scoped_pending_query(request, query_id)
+        if error:
+            return error
 
         selected_query.delete()
 

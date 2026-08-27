@@ -1017,6 +1017,25 @@ def record_university_interest(student_id: str, university_id: str, source: str)
     UniversityInterestEvent.objects.get_or_create(student=profile, university_id=university_id, source=source)
 
 
+def student_has_university_interest(student_id: str, university_id: str) -> bool:
+    """
+    True if this student has an on-record interest signal for this university
+    (an UniversityInterestEvent -- searched it, ran a fit check, etc.).
+
+    This is the access boundary for the officer dashboard's per-student views
+    (profile detail, profile-presenter chat): an officer may only inspect a
+    student who has actually engaged with their university. 
+    """
+    from django_api.models import UniversityInterestEvent
+
+    if not student_id or not university_id:
+        return False
+
+    return UniversityInterestEvent.objects.filter(
+        university_id=university_id, student__student_id=make_student_id(student_id)
+    ).exists()
+
+
 DEFAULT_PRIORITY_TIER_BOUNDS = {"high": 80, "medium": 60, "low": 40}
 
 
