@@ -745,6 +745,9 @@ Return ONLY the reformatted answer text. No JSON, no preamble.
         chain, so officer calls never create one. Instead they get a
         guardrail response pointing at the knowledge base gap directly.
         """
+    
+        self.kb.reload()
+
         self.kb.total_questions_answered += 1
 
         # 1. Human-verified durable knowledge always wins.
@@ -997,6 +1000,10 @@ QUESTION:
 
         Returns a structured dict that can be stored in StudentProfile.
         """
+        # Cached agent instance -- pull in any knowledge added since it was
+        # built before assessing fit against the knowledge base.
+        self.kb.reload()
+
         self.kb.total_questions_answered += 1
 
         prompt = f"""

@@ -167,6 +167,20 @@ class UniversityKnowledgeBase:
     # DB persistence
     # ------------------------------------------------------------------
 
+    def reload(self) -> None:
+        """
+        Re-read every entry from the DB, replacing the in-memory cache.
+
+        A UniversityAgent is cached for the worker process's lifetime
+        (agents.commons._university_agents), but knowledge is added through
+        other code paths -- manual entry, scraping, resolved pending queries --
+        that each write through their own short-lived UniversityKnowledgeBase.
+        Without this, a long-lived agent keeps answering from whatever
+        knowledge existed when it was first built.
+        """
+        self.entries = []
+        self._load_from_db()
+
     def _load_from_db(self) -> None:
         from django_api.models import UniversityKnowledgeEntry
 
