@@ -22,6 +22,7 @@ from django_api.models import StudentProfile
 from institutes.services import register_institute
 
 from .models import ListedStudent, UniversityStudentList
+from .tasks import claim_otp_cache_key
 
 CSV = (
     "full_name,email,field_of_study,degree_level,expected_graduation,phone\n"
@@ -32,8 +33,24 @@ CSV = (
 
 
 def _code_from_outbox() -> str:
-    body = mail.outbox[-1].body
-    return re.search(r"(\d{6})", body).group(1)
+    # Legacy tests used to read the code from locmem email because
+    # claim/start sent SMTP synchronously. Delivery is now queued, so the
+    # view stores the short-lived plaintext code in the shared cache and the
+    # Celery task removes it after sending. Keep the helper name to avoid
+    # obscuring the behavioral tests below, but read the queued code when no
+    # email has been delivered in-process.
+    if mail.outbox:
+        body = mail.outbox[-1].body
+        return re.search(r"(\d{6})", body).group(1)
+
+    row = ListedStudent.objects.exclude(otp_hash="").order_by("-otp_expires_at").first()
+    if row is None:
+        raise AssertionError("No claim OTP was prepared.")
+
+    code = cache.get(claim_otp_cache_key(row.id, row.otp_hash))
+    if not isinstance(code, str) or not code:
+        raise AssertionError("The queued claim OTP is unavailable.")
+    return code
 
 
 @override_settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend")
@@ -43,6 +60,12 @@ class ClaimFlowTests(TestCase):
         # (unlike the DB) isn't rolled back between test methods -- clear it
         # so one method's claim/start calls don't eat into another's budget.
         cache.clear()
+        self.claim_otp_delivery_patcher = mock.patch(
+            "institutes_list.claim_views.send_claim_otp_email_task.delay"
+        )
+        self.mock_claim_otp_delivery = self.claim_otp_delivery_patcher.start()
+        self.addCleanup(self.claim_otp_delivery_patcher.stop)
+
         self.client = APIClient()
         self.institute = register_institute("Wright State Feeder Institute", contact_email="ops@wsfi.edu")
         user = get_user_model().objects.create_user(
@@ -83,8 +106,10 @@ class ClaimFlowTests(TestCase):
         resp = self.client.post("/api/claim/start/", {"token": row.claim_token}, format="json")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"masked_email": "p•••••@gmail.com"})
-        self.assertEqual(len(mail.outbox), 1)
-        self.assertIn("gmail.com", mail.outbox[0].to[0])
+
+        row.refresh_from_db()
+        self.mock_claim_otp_delivery.assert_called_once_with(row.id, row.otp_hash)
+        self.assertEqual(mail.outbox, [])
 
     def test_start_is_generic_for_unknown_email(self):
         resp = self.client.post("/api/claim/start/", {"email": "stranger@gmail.com"}, format="json")
@@ -389,6 +414,12 @@ class ClaimRateLimitTests(TestCase):
 
     def setUp(self):
         cache.clear()
+        self.claim_otp_delivery_patcher = mock.patch(
+            "institutes_list.claim_views.send_claim_otp_email_task.delay"
+        )
+        self.mock_claim_otp_delivery = self.claim_otp_delivery_patcher.start()
+        self.addCleanup(self.claim_otp_delivery_patcher.stop)
+
         self.client = APIClient()
         self.institute = register_institute("Rate Limit Institute", contact_email="ops@rli.edu")
         user = get_user_model().objects.create_user(
