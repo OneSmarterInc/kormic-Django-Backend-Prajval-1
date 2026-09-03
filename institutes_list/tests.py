@@ -91,6 +91,22 @@ class ClaimFlowTests(TestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertNotIn("stranger", str(resp.json()))
 
+    @mock.patch("institutes_list.views.send_mail", side_effect=RuntimeError("SMTP unavailable"))
+    def test_start_email_failure_returns_json_and_invalidates_code(self, _send_mail):
+        row = ListedStudent.objects.get(email="priya.sharma@gmail.com")
+
+        resp = self.client.post("/api/claim/start/", {"token": row.claim_token}, format="json")
+
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(
+            resp.json(),
+            {"error": "We could not send the verification code. Please try again shortly."},
+        )
+        row.refresh_from_db()
+        self.assertEqual(row.otp_hash, "")
+        self.assertIsNone(row.otp_expires_at)
+        self.assertEqual(row.otp_attempts, 0)
+
     # ------------------------------------------------------------ claim: verify
 
     def test_wrong_code_counted_and_limited(self):
@@ -288,6 +304,18 @@ class ClaimFlowTests(TestCase):
         self.client.force_authenticate(user=user)
         resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
         self.assertEqual(resp.status_code, 500)
+
+    @override_settings(DEBUG=False, CLAIM_PAGE_URL="http://localhost:5173/claim")
+    @mock.patch("institutes_list.views.send_invite_email_task.delay")
+    def test_send_invites_rejects_localhost_url_in_production(self, mock_delay):
+        user = get_user_model().objects.get(username="officer@wsfi.edu")
+        self.client.force_authenticate(user=user)
+
+        resp = self.client.post(f"/api/institute-lists/lists/{self.upload['list_id']}/send-invites/")
+
+        self.assertEqual(resp.status_code, 500)
+        self.assertIn("cannot use localhost", resp.json()["error"])
+        mock_delay.assert_not_called()
 
     @override_settings(CLAIM_PAGE_URL="https://app.kormic.example/claim")
     @mock.patch("institutes_list.views.send_invite_email_task.delay")
