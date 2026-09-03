@@ -121,10 +121,9 @@ def start_claim(request):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
 
+    # Preserve the established public response contract used by released
+    # student clients; delivery is an implementation detail.
     return Response(
-        {
-            "masked_email": _mask_email(row.email),
-            "delivery": "queued",
-        },
+        {"masked_email": _mask_email(row.email)},
         status=status.HTTP_200_OK,
     )
