@@ -22,19 +22,20 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from .models import ListedStudent
+from .models import ListedStudent, UniversityStudentList
 from .tasks import (
     cache_claim_otp_code,
     discard_claim_otp_code,
     send_claim_otp_email_task,
 )
-from .throttling import (
-    ClaimStartEmailThrottle,
-    ClaimStartIPThrottle,
-)
+from .throttling import ClaimStartEmailThrottle, ClaimStartIPThrottle
 from .views import OTP_TTL_SECONDS, _find_claimable, _hash_otp, _mask_email
 
 logger = logging.getLogger(__name__)
+
+
+class ClaimInvitationUnavailable(Exception):
+    """Raised when an invitation is consumed while claim/start is running."""
 
 
 def _clear_failed_otp_state(listed_student_id: int, expected_otp_hash: str) -> None:
@@ -77,11 +78,18 @@ def start_claim(request):
     # plaintext OTP is stored in the database or serialized into task args.
     try:
         with transaction.atomic():
-            ListedStudent.objects.filter(id=row.id).update(
+            updated = ListedStudent.objects.filter(
+                id=row.id,
+                status=ListedStudent.Status.UNCLAIMED,
+                source_list__status=UniversityStudentList.Status.ACTIVE,
+            ).update(
                 otp_hash=otp_hash,
                 otp_expires_at=expires_at,
                 otp_attempts=0,
             )
+            if updated != 1:
+                raise ClaimInvitationUnavailable()
+
             if not cache_claim_otp_code(
                 row.id,
                 otp_hash,
@@ -89,6 +97,12 @@ def start_claim(request):
                 timeout=OTP_TTL_SECONDS,
             ):
                 raise RuntimeError("The OTP delivery cache did not accept the verification code.")
+    except ClaimInvitationUnavailable:
+        discard_claim_otp_code(row.id, otp_hash)
+        return Response(
+            {"error": "No claimable invitation found for that information."},
+            status=status.HTTP_404_NOT_FOUND,
+        )
     except Exception:
         logger.exception("Unable to prepare claim OTP delivery for ListedStudent %s.", row.id)
         _clear_failed_otp_state(row.id, otp_hash)
