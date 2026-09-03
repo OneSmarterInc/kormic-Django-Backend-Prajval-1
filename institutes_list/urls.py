@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import claim_views, views
 
 urlpatterns = [
     path("institute-lists/upload/", views.upload_list, name="institute-list-upload"),
@@ -13,7 +13,7 @@ urlpatterns = [
         views.send_invite,
         name="institute-list-send-invite",
     ),
-    path("claim/start/", views.start_claim, name="claim-start"),
+    path("claim/start/", claim_views.start_claim, name="claim-start"),
     path("claim/verify/", views.verify_claim, name="claim-verify"),
     path("claim/confirm/", views.confirm_claim, name="claim-confirm"),
 ]
