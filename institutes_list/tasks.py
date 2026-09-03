@@ -35,11 +35,26 @@ def cache_claim_otp_code(
     *,
     timeout: int,
 ) -> bool:
-    return bool(cache.set(claim_otp_cache_key(listed_student_id, otp_hash), code, timeout=timeout))
+    """Store and verify the short-lived plaintext delivery payload.
+
+    Django's cache API does not guarantee that ``set`` returns a truthy
+    value for every backend, so verify the write with a read instead of
+    relying on a backend-specific return value.
+    """
+    key = claim_otp_cache_key(listed_student_id, otp_hash)
+    cache.set(key, code, timeout=timeout)
+    return cache.get(key) == code
 
 
 def discard_claim_otp_code(listed_student_id: int, otp_hash: str) -> None:
-    cache.delete(claim_otp_cache_key(listed_student_id, otp_hash))
+    """Best-effort cleanup that must never turn a JSON API error into HTML."""
+    try:
+        cache.delete(claim_otp_cache_key(listed_student_id, otp_hash))
+    except Exception:
+        logger.exception(
+            "Unable to remove cached claim OTP for ListedStudent %s.",
+            listed_student_id,
+        )
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=30)
@@ -96,7 +111,15 @@ def send_claim_otp_email_task(
     from institutes_list.models import ListedStudent
 
     cache_key = claim_otp_cache_key(listed_student_id, expected_otp_hash)
-    code = cache.get(cache_key)
+
+    try:
+        code = cache.get(cache_key)
+    except Exception as exc:
+        logger.exception(
+            "send_claim_otp_email_task: cache read failed for ListedStudent %s.",
+            listed_student_id,
+        )
+        raise self.retry(exc=exc)
 
     if not isinstance(code, str) or not code:
         logger.warning(
@@ -110,10 +133,18 @@ def send_claim_otp_email_task(
             "send_claim_otp_email_task: cached OTP integrity check failed for ListedStudent %s.",
             listed_student_id,
         )
-        cache.delete(cache_key)
+        discard_claim_otp_code(listed_student_id, expected_otp_hash)
         return
 
-    row = ListedStudent.objects.filter(id=listed_student_id).first()
+    try:
+        row = ListedStudent.objects.filter(id=listed_student_id).first()
+    except Exception as exc:
+        logger.exception(
+            "send_claim_otp_email_task: database read failed for ListedStudent %s.",
+            listed_student_id,
+        )
+        raise self.retry(exc=exc)
+
     is_current = bool(
         row
         and row.status == ListedStudent.Status.UNCLAIMED
@@ -126,7 +157,7 @@ def send_claim_otp_email_task(
             "send_claim_otp_email_task: skipping stale OTP delivery for ListedStudent %s.",
             listed_student_id,
         )
-        cache.delete(cache_key)
+        discard_claim_otp_code(listed_student_id, expected_otp_hash)
         return
 
     try:
@@ -146,4 +177,7 @@ def send_claim_otp_email_task(
         # hash, so a retry of this task will safely self-cancel as stale.
         raise self.retry(exc=exc)
 
-    cache.delete(cache_key)
+    # Do not retry a successfully delivered email only because cache cleanup
+    # had a transient problem; the cache entry has the same short TTL as the
+    # OTP and cannot be used after the row expires or is replaced.
+    discard_claim_otp_code(listed_student_id, expected_otp_hash)
