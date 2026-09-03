@@ -5,10 +5,11 @@ Institute-list intake and the student claim flow.
 import csv
 import hashlib
 import io
+import logging
 import secrets
 import uuid
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from django.conf import settings
 from django.core import signing
@@ -32,6 +33,17 @@ from .throttling import (
     ClaimVerifyEmailThrottle,
     ClaimVerifyIPThrottle,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _claim_page_url_error() -> str:
+    url = settings.CLAIM_PAGE_URL.strip()
+    if not url:
+        return "CLAIM_PAGE_URL is not configured on the server -- set it before sending invites."
+    if not settings.DEBUG and urlparse(url).hostname in {"localhost", "127.0.0.1", "::1"}:
+        return "CLAIM_PAGE_URL cannot use localhost in production. Configure the deployed student-app claim URL."
+    return ""
 
 OTP_TTL_SECONDS = 10 * 60
 OTP_MAX_ATTEMPTS = 5
@@ -436,9 +448,10 @@ def send_invites(request, list_id):
     if error:
         return error
 
-    if not settings.CLAIM_PAGE_URL:
+    claim_page_url_error = _claim_page_url_error()
+    if claim_page_url_error:
         return Response(
-            {"error": "CLAIM_PAGE_URL is not configured on the server -- set it before sending invites."},
+            {"error": claim_page_url_error},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -479,9 +492,10 @@ def send_invite(request, list_id, student_id):
     if error:
         return error
 
-    if not settings.CLAIM_PAGE_URL:
+    claim_page_url_error = _claim_page_url_error()
+    if claim_page_url_error:
         return Response(
-            {"error": "CLAIM_PAGE_URL is not configured on the server -- set it before sending invites."},
+            {"error": claim_page_url_error},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
@@ -537,17 +551,30 @@ def start_claim(request):
     row.otp_attempts = 0
     row.save(update_fields=["otp_hash", "otp_expires_at", "otp_attempts"])
 
-    send_mail(
-        subject="Your Kormic claim code",
-        message=(
-            f"Your one-time code is {code}. It expires in 10 minutes.\n\n"
-            "Your university listed this address so you can claim your Kormic "
-            "profile. If you didn't request this, you can ignore it."
-        ),
-        from_email=None,  # DEFAULT_FROM_EMAIL
-        recipient_list=[row.email],
-        fail_silently=False,
-    )
+    try:
+        send_mail(
+            subject="Your Kormic claim code",
+            message=(
+                f"Your one-time code is {code}. It expires in 10 minutes.\n\n"
+                "Your university listed this address so you can claim your Kormic "
+                "profile. If you didn't request this, you can ignore it."
+            ),
+            from_email=None,  # DEFAULT_FROM_EMAIL
+            recipient_list=[row.email],
+            fail_silently=False,
+        )
+    except Exception:
+        # Never let Django/proxy HTML leak into this JSON API. Also invalidate
+        # the code that was not delivered so it cannot be guessed or reused.
+        logger.exception("Unable to send claim verification code for listed student %s", row.id)
+        row.otp_hash = ""
+        row.otp_expires_at = None
+        row.otp_attempts = 0
+        row.save(update_fields=["otp_hash", "otp_expires_at", "otp_attempts"])
+        return Response(
+            {"error": "We could not send the verification code. Please try again shortly."},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
     return Response({"masked_email": _mask_email(row.email)})
 
 
