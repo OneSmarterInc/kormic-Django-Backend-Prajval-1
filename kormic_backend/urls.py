@@ -20,4 +20,7 @@ urlpatterns = [
     path("api/superuser/", include("project_superuser.urls")),
     path("api/", include("institutes_list.urls")),
     path("api/", include("django_api.urls")),
+    # Compatibility for released/local student builds whose API base omitted
+    # the /api suffix. Canonical claim URLs remain under /api/claim/.
+    path("claim/", include("institutes_list.claim_compat_urls")),
 ]
