@@ -9,11 +9,19 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from . import github_tools, profile_tools, roadmap_tools, university_tools, verification_tools
+from . import (
+    github_tools,
+    profile_tools,
+    roadmap_tools,
+    time_tools,
+    university_tools,
+    verification_tools,
+)
 
 
 def build_all_tools(ctx: Dict[str, Any]) -> List[Any]:
     return [
+        *time_tools.build_tools(ctx),
         *profile_tools.build_tools(ctx),
         *github_tools.build_tools(ctx),
         *verification_tools.build_tools(ctx),
