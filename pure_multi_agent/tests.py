@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from unittest import mock
 
-from django.test import SimpleTestCase, TestCase
+from django.test import TestCase
 
 from django_api.models import AgentConversationLog
 from django_api.tests import _reset_inprocess_agent_caches
@@ -27,7 +27,7 @@ def _fake_response(payload: dict):
     return FakeResponse(json.dumps(payload))
 
 
-class CurrentDateContextTests(SimpleTestCase):
+class CurrentDateContextTests(TestCase):
     fixed_utc = datetime(2026, 9, 4, 7, 0, 0, tzinfo=timezone.utc)
 
     def test_runtime_prompt_contains_authoritative_current_date(self):
