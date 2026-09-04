@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from personas.aria_constitution import build_agent_system_prompt
+from pure_multi_agent.time_context import render_runtime_time_context
 
 VALID_RESPONSE_MODES = {"short", "detailed", "summary"}
 
@@ -100,14 +102,19 @@ leave the pending item alone -- it will be re-surfaced later.
 TOOL_USE_RULES = """
 
 TOOL USE RULES:
-- You have tools to analyze a shared GitHub profile, check/resolve profile
-  verification mismatches, ask a specific university agent a question, get a
-  saved/generated fit assessment for a specific university, list which
-  university agents exist, ask every university agent at once for a broad
-  comparison, save profile facts, and manage the student's application
-  roadmap. Decide dynamically which tool(s) a message actually needs --
-  do not guess or answer from memory when a tool can get you a verified
-  answer.
+- You have tools to get the authoritative current date/time, analyze a shared
+  GitHub profile, check/resolve profile verification mismatches, ask a specific
+  university agent a question, get a saved/generated fit assessment for a
+  specific university, list which university agents exist, ask every university
+  agent at once for a broad comparison, save profile facts, and manage the
+  student's application roadmap. Decide dynamically which tool(s) a message
+  actually needs -- do not guess or answer from memory when a tool can get you
+  a verified answer.
+- For any question whose answer depends on the current date/time, relative time,
+  or whether a deadline is past/upcoming, use the CURRENT DATE/TIME runtime
+  context above. If the student asks about a different timezone or needs an
+  authoritative clock lookup, call get_current_datetime. Never guess today's
+  date from model training knowledge or from an old chat message.
 - Any question about a specific, named university's facts -- leadership
   (president, principal, dean, department chair), contact info, deadlines,
   requirements, tuition, funding, courses, or anything else official --
@@ -173,11 +180,12 @@ def build_runtime_system_prompt(
     memory: dict,
     response_mode: str,
     pending_item: Optional[Dict[str, Any]] = None,
+    now_utc: Optional[datetime] = None,
 ) -> str:
     """Assemble the full per-turn system prompt: persona + profile context
     (agents.personas.aria_constitution.build_agent_system_prompt, unchanged)
     + persistent memory + response-mode style + pending verification note +
-    tool-use rules."""
+    authoritative runtime date/time context + tool-use rules."""
     if response_mode not in VALID_RESPONSE_MODES:
         response_mode = "detailed"
 
@@ -186,5 +194,6 @@ def build_runtime_system_prompt(
         + _memory_context(student_profile, memory)
         + _response_mode_instruction(response_mode)
         + _pending_verification_note(pending_item)
+        + render_runtime_time_context(student_profile, now_utc=now_utc)
         + TOOL_USE_RULES
     )
