@@ -38,11 +38,15 @@ class CurrentDateContextTests(TestCase):
             response_mode="short",
             now_utc=self.fixed_utc,
         )
+        normalized_prompt = " ".join(prompt.split())
 
         self.assertIn("CURRENT DATE/TIME — AUTHORITATIVE RUNTIME CONTEXT", prompt)
         self.assertIn("Timezone: Asia/Kolkata", prompt)
         self.assertIn("Current date: Friday, September 4, 2026", prompt)
-        self.assertIn("Never infer the current date from model training knowledge", prompt)
+        self.assertIn(
+            "Never infer the current date from model training knowledge",
+            normalized_prompt,
+        )
 
     def test_saved_student_timezone_overrides_default(self):
         payload = current_time_payload(
